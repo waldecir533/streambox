@@ -1,7 +1,6 @@
 import 'dart:io';
 
 import 'package:android_intent_plus/android_intent.dart';
-import 'package:flutter/material.dart';
 import 'package:flutter_chrome_cast/discovery.dart';
 import 'package:flutter_chrome_cast/entities.dart';
 import 'package:flutter_chrome_cast/enums.dart';
