@@ -61,6 +61,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _importEpg() async {
     final controller = TextEditingController(text: await _prefs.epgUrl());
+    if (!mounted) {
+      controller.dispose();
+      return;
+    }
     final url = await showDialog<String>(context: context, builder: (context) => AlertDialog(title: const Text('Guia de programação (XMLTV)'), content: TextField(controller: controller, keyboardType: TextInputType.url, decoration: const InputDecoration(labelText: 'URL do EPG', border: OutlineInputBorder())), actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancelar')), FilledButton(onPressed: () => Navigator.pop(context, controller.text), child: const Text('Importar'))]));
     controller.dispose(); if (url == null || url.trim().isEmpty) return;
     setState(() => _loading = true);
@@ -72,6 +76,10 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _accessDialog() async {
     final m3u = TextEditingController(text: await _prefs.playlistUrl());
     final server = TextEditingController(), user = TextEditingController(), pass = TextEditingController();
+    if (!mounted) {
+      m3u.dispose(); server.dispose(); user.dispose(); pass.dispose();
+      return;
+    }
     var tab = 0;
     await showDialog<void>(context: context, builder: (dialogContext) => StatefulBuilder(builder: (context, setLocal) => AlertDialog(title: const Text('Adicionar acesso'), content: SizedBox(width: 460, child: Column(mainAxisSize: MainAxisSize.min, children: [SegmentedButton<int>(segments: const [ButtonSegment(value: 0, label: Text('M3U')), ButtonSegment(value: 1, label: Text('Xtream'))], selected: {tab}, onSelectionChanged: (v) => setLocal(() => tab = v.first)), const SizedBox(height: 16), if (tab == 0) TextField(controller: m3u, decoration: const InputDecoration(labelText: 'URL M3U/M3U8', border: OutlineInputBorder())) else ...[TextField(controller: server, decoration: const InputDecoration(labelText: 'Servidor', border: OutlineInputBorder())), const SizedBox(height: 8), TextField(controller: user, decoration: const InputDecoration(labelText: 'Usuário', border: OutlineInputBorder())), const SizedBox(height: 8), TextField(controller: pass, obscureText: true, decoration: const InputDecoration(labelText: 'Senha', border: OutlineInputBorder()))]])), actions: [TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Cancelar')), FilledButton(onPressed: () { Navigator.pop(dialogContext); tab == 0 ? _loadM3u(m3u.text) : _loadXtream(server.text, user.text, pass.text); }, child: const Text('Entrar'))])));
     m3u.dispose(); server.dispose(); user.dispose(); pass.dispose();
@@ -93,5 +101,5 @@ class _HomeScreenState extends State<HomeScreen> {
     ])));
 }
 
-class _Logo extends StatelessWidget { const _Logo(this.url); final String? url; @override Widget build(BuildContext context) => SizedBox.square(dimension: 48, child: url == null || url!.isEmpty ? const Icon(Icons.live_tv) : Image.network(url!, fit: BoxFit.contain, errorBuilder: (_, __, ___) => const Icon(Icons.live_tv))); }
+class _Logo extends StatelessWidget { const _Logo(this.url); final String? url; @override Widget build(BuildContext context) => SizedBox.square(dimension: 48, child: url == null || url!.isEmpty ? const Icon(Icons.live_tv) : Image.network(url!, fit: BoxFit.contain, errorBuilder: (_, _, _) => const Icon(Icons.live_tv))); }
 class _Welcome extends StatelessWidget { const _Welcome({required this.onAdd}); final VoidCallback onAdd; @override Widget build(BuildContext context) => Center(child: Padding(padding: const EdgeInsets.all(28), child: Column(mainAxisSize: MainAxisSize.min, children: [Icon(Icons.live_tv, size: 76, color: Theme.of(context).colorScheme.primary), const SizedBox(height: 16), Text('Seu conteúdo, em uma tela simples', style: Theme.of(context).textTheme.headlineSmall, textAlign: TextAlign.center), const SizedBox(height: 8), const Text('Adicione uma lista M3U ou um acesso Xtream autorizado. O StreamBox não fornece canais.' , textAlign: TextAlign.center), const SizedBox(height: 20), FilledButton.icon(onPressed: onAdd, icon: const Icon(Icons.add), label: const Text('Adicionar acesso'))]))); }
