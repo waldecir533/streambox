@@ -1,8 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:flutter_chrome_cast/cast_context.dart';
-import 'package:flutter_chrome_cast/discovery.dart';
+import 'package:flutter_chrome_cast/flutter_chrome_cast.dart';
 
 import 'screens/home_screen.dart';
 

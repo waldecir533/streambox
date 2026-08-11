@@ -17,4 +17,20 @@ https://example.com/live/index.m3u8
     expect(channels.first.tvgId, 'news');
     expect(channels.first.url, 'https://example.com/live/index.m3u8');
   });
+
+  test('ignores comments, invalid URLs and entries without EXTINF', () {
+    const source = '''
+#EXTM3U
+https://example.com/without-metadata.m3u8
+#EXTINF:-1,Inválido
+not-a-url
+#EXTINF:-1,Canal seguro
+https://example.com/live.m3u8
+''';
+
+    final channels = const M3uParser().parse(source);
+
+    expect(channels, hasLength(1));
+    expect(channels.single.name, 'Canal seguro');
+  });
 }
