@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:developer' as developer;
 
 import 'package:http/http.dart' as http;
 import 'package:xml/xml.dart';
@@ -34,28 +35,48 @@ class DlnaException implements Exception {
 }
 
 class DlnaService {
-  DlnaService({http.Client? client}) : _client = client ?? http.Client();
+  DlnaService({
+    http.Client? client,
+    this.searchTimeout = const Duration(seconds: 6),
+    this.connectionTimeout = const Duration(seconds: 8),
+  }) : _client = client ?? http.Client();
 
   static const _searchTarget = 'urn:schemas-upnp-org:device:MediaRenderer:1';
   final http.Client _client;
+  final Duration searchTimeout;
+  final Duration connectionTimeout;
   final _devicesController = StreamController<List<DlnaDevice>>.broadcast();
   final Map<String, DlnaDevice> _devices = {};
   final StreamProxyService _proxy = StreamProxyService();
   RawDatagramSocket? _socket;
   Timer? _finishTimer;
+  Completer<void>? _discoveryCompleter;
+  int _discoveryGeneration = 0;
+  bool _disposed = false;
   DlnaDevice? connectedDevice;
 
   Stream<List<DlnaDevice>> get devices => _devicesController.stream;
 
-  Future<void> discover({Duration duration = const Duration(seconds: 5)}) async {
+  Future<void> discover({Duration? duration}) async {
     await stopDiscovery();
+    if (_disposed) return;
+    final generation = ++_discoveryGeneration;
+    final completion = Completer<void>();
+    _discoveryCompleter = completion;
     _devices.clear();
     _devicesController.add(const []);
+    developer.log('Iniciando descoberta SSDP/UPnP', name: 'StreamBox.DLNA');
     try {
       final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
       _socket = socket;
       socket.broadcastEnabled = true;
-      socket.listen(_onSocketEvent, onError: (_) => stopDiscovery());
+      socket.listen(
+        (event) => _onSocketEvent(event, generation),
+        onError: (Object error) {
+          developer.log('Erro no socket SSDP', name: 'StreamBox.DLNA', error: error);
+          stopDiscovery();
+        },
+      );
       final request = [
         'M-SEARCH * HTTP/1.1',
         'HOST: 239.255.255.250:1900',
@@ -70,16 +91,18 @@ class DlnaService {
         InternetAddress('239.255.255.250'),
         1900,
       );
-      _finishTimer = Timer(duration, stopDiscovery);
+      _finishTimer = Timer(duration ?? searchTimeout, stopDiscovery);
+      await completion.future;
     } on SocketException {
+      await stopDiscovery();
       throw const DlnaException(
-        'Não foi possível procurar TVs. Confirme que o Wi-Fi está ligado.',
+        'Não foi possível conectar à TV',
       );
     }
   }
 
-  Future<void> _onSocketEvent(RawSocketEvent event) async {
-    if (event != RawSocketEvent.read) return;
+  Future<void> _onSocketEvent(RawSocketEvent event, int generation) async {
+    if (event != RawSocketEvent.read || generation != _discoveryGeneration || _disposed) return;
     final datagram = _socket?.receive();
     if (datagram == null) return;
     final response = utf8.decode(datagram.data, allowMalformed: true);
@@ -90,11 +113,18 @@ class DlnaService {
     if (location == null || _devices.containsKey(location.toString())) return;
     try {
       final device = await _loadDescription(location);
-      if (device != null) {
+      if (device != null && generation == _discoveryGeneration && !_disposed) {
         _devices[device.id] = device;
         _devicesController.add(_devices.values.toList(growable: false));
+        developer.log('TV DLNA encontrada: ${device.name}', name: 'StreamBox.DLNA');
       }
-    } catch (_) {
+    } catch (error, stackTrace) {
+      developer.log(
+        'Descrição UPnP inválida ou inacessível',
+        name: 'StreamBox.DLNA',
+        error: error,
+        stackTrace: stackTrace,
+      );
       // Other SSDP devices may return incomplete descriptions; ignore them.
     }
   }
@@ -112,7 +142,7 @@ class DlnaService {
   }
 
   Future<DlnaDevice?> _loadDescription(Uri location) async {
-    final response = await _client.get(location).timeout(const Duration(seconds: 5));
+    final response = await _client.get(location).timeout(connectionTimeout);
     if (response.statusCode < 200 || response.statusCode >= 300) return null;
     final document = XmlDocument.parse(response.body);
     final deviceNode = document.findAllElements('device').firstOrNull;
@@ -140,8 +170,24 @@ class DlnaService {
   }
 
   Future<void> connect(DlnaDevice device, Channel channel) async {
-    await setChannel(device, channel);
-    connectedDevice = device;
+    developer.log('Conectando via AVTransport: ${device.name}', name: 'StreamBox.DLNA');
+    try {
+      await setChannel(device, channel).timeout(connectionTimeout);
+      connectedDevice = device;
+      developer.log('Conexão DLNA concluída', name: 'StreamBox.DLNA');
+    } on TimeoutException {
+      developer.log('Timeout na conexão DLNA', name: 'StreamBox.DLNA');
+      throw const DlnaException('Não foi possível conectar à TV');
+    } catch (error, stackTrace) {
+      developer.log(
+        'Falha na conexão DLNA',
+        name: 'StreamBox.DLNA',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      if (error is DlnaException) rethrow;
+      throw const DlnaException('Não foi possível conectar à TV');
+    }
   }
 
   Future<void> setChannel(DlnaDevice device, Channel channel) async {
@@ -234,19 +280,19 @@ class DlnaService {
           'SOAPACTION': '"$serviceType#$action"',
         },
         body: body.toString(),
-      ).timeout(const Duration(seconds: 8));
+      ).timeout(connectionTimeout);
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw const DlnaException(
-          'A TV não aceitou este canal ou formato. A reprodução continuará no celular.',
+          'Não foi possível conectar à TV',
         );
       }
     } on TimeoutException {
       throw const DlnaException(
-        'A TV parou de responder. A reprodução continuará no celular.',
+        'Não foi possível conectar à TV',
       );
     } on SocketException {
       throw const DlnaException(
-        'A conexão com a TV foi perdida. A reprodução continuará no celular.',
+        'Não foi possível conectar à TV',
       );
     }
   }
@@ -273,13 +319,19 @@ class DlnaService {
       .replaceAll("'", '&apos;');
 
   Future<void> stopDiscovery() async {
+    _discoveryGeneration++;
     _finishTimer?.cancel();
     _finishTimer = null;
     _socket?.close();
     _socket = null;
+    final completion = _discoveryCompleter;
+    _discoveryCompleter = null;
+    if (completion != null && !completion.isCompleted) completion.complete();
+    developer.log('Descoberta SSDP encerrada', name: 'StreamBox.DLNA');
   }
 
   Future<void> dispose() async {
+    _disposed = true;
     await stopDiscovery();
     await _devicesController.close();
     await _proxy.dispose();

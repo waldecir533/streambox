@@ -17,6 +17,9 @@ class CastService {
   static void startDiscovery() =>
       GoogleCastDiscoveryManager.instance.startDiscovery();
 
+  static void stopDiscovery() =>
+      GoogleCastDiscoveryManager.instance.stopDiscovery();
+
   static Future<void> cast(Channel channel, GoogleCastDevice? device) async {
     if (device != null) {
       await GoogleCastSessionManager.instance.startSessionWithDevice(device);

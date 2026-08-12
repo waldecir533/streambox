@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:developer' as developer;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_vlc_player/flutter_vlc_player.dart';
@@ -24,7 +27,7 @@ class PlayerScreen extends StatefulWidget {
   State<PlayerScreen> createState() => _PlayerScreenState();
 }
 
-class _PlayerScreenState extends State<PlayerScreen> {
+class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver {
   PlayerEngine _preference = PlayerEngine.automatic;
   PlayerEngine _activeEngine = PlayerEngine.media3;
   VideoFit _fit = VideoFit.contain;
@@ -35,16 +38,79 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _fullscreen = false;
   String? _error;
   double _speed = 1;
+  bool _isForeground = true;
+  bool _resumeOnForeground = false;
+  bool _castDialogOpen = false;
+  bool _switchingPlayer = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _startMedia3();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    developer.log('Lifecycle do player: $state', name: 'StreamBox.Player');
+    switch (state) {
+      case AppLifecycleState.paused:
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.hidden:
+        _isForeground = false;
+        _resumeOnForeground = _resumeOnForeground || _playing;
+        unawaited(_pauseLocal());
+        break;
+      case AppLifecycleState.resumed:
+        _isForeground = true;
+        if (_resumeOnForeground && !_castDialogOpen) {
+          _resumeOnForeground = false;
+          unawaited(_resumeLocal());
+        }
+        break;
+      case AppLifecycleState.detached:
+        _isForeground = false;
+        break;
+    }
+  }
+
+  Future<void> _pauseLocal() async {
+    try {
+      if (_activeEngine == PlayerEngine.media3) {
+        await _mediaController?.pause();
+      } else {
+        await _vlcController?.pause();
+      }
+    } catch (error, stackTrace) {
+      developer.log('Falha ao pausar player local', name: 'StreamBox.Player', error: error, stackTrace: stackTrace);
+    }
+  }
+
+  Future<void> _resumeLocal() async {
+    if (!mounted || !_isForeground) return;
+    try {
+      if (_activeEngine == PlayerEngine.media3) {
+        final controller = _mediaController;
+        if (controller != null && controller.value.isInitialized) await controller.play();
+      } else {
+        final controller = _vlcController;
+        if (controller != null && controller.value.isInitialized) await controller.play();
+      }
+      if (mounted) setState(() => _error = null);
+    } catch (error, stackTrace) {
+      developer.log('Falha ao retomar player local', name: 'StreamBox.Player', error: error, stackTrace: stackTrace);
+      await _reload();
+    }
+  }
+
   Future<void> _startMedia3() async {
+    if (_switchingPlayer) return;
+    _switchingPlayer = true;
     await _disposePlayers();
-    if (!mounted) return;
+    if (!mounted) {
+      _switchingPlayer = false;
+      return;
+    }
     setState(() {
       _activeEngine = PlayerEngine.media3;
       _loading = true;
@@ -65,10 +131,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
     try {
       await controller.initialize().timeout(const Duration(seconds: 12));
       await controller.setPlaybackSpeed(_speed);
-      await controller.play();
+      if (_isForeground) await controller.play();
       if (mounted) setState(() => _loading = false);
     } catch (_) {
       if (_preference == PlayerEngine.automatic) {
+        _switchingPlayer = false;
         await _startVlc();
       } else if (mounted) {
         setState(() {
@@ -76,6 +143,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
           _error = 'Não foi possível abrir este canal com o player Android.';
         });
       }
+    } finally {
+      _switchingPlayer = false;
     }
   }
 
@@ -93,8 +162,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Future<void> _startVlc() async {
+    if (_switchingPlayer) return;
+    _switchingPlayer = true;
     await _disposePlayers();
-    if (!mounted) return;
+    if (!mounted) {
+      _switchingPlayer = false;
+      return;
+    }
     setState(() {
       _activeEngine = PlayerEngine.libvlc;
       _loading = true;
@@ -103,7 +177,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
     final controller = VlcPlayerController.network(
       widget.channel.url,
-      autoPlay: true,
+      autoPlay: _isForeground,
       hwAcc: HwAcc.full,
       options: VlcPlayerOptions(
         advanced: VlcAdvancedOptions([VlcAdvancedOptions.networkCaching(1500)]),
@@ -122,6 +196,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
           _error = 'Não foi possível reproduzir este canal. Confira sua conexão e tente novamente.';
         });
       }
+    } finally {
+      _switchingPlayer = false;
     }
   }
 
@@ -243,12 +319,37 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _disposePlayers();
     if (_fullscreen) {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
       SystemChrome.setPreferredOrientations(DeviceOrientation.values);
     }
     super.dispose();
+  }
+
+  Future<void> _openCastDialog() async {
+    final wasPlaying = _playing;
+    _castDialogOpen = true;
+    await _pauseLocal();
+    if (!mounted) return;
+    final shouldResume = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => CastDialog(
+        channel: widget.channel,
+        channels: widget.channels,
+        onConnectionFailed: () {
+          if (wasPlaying) unawaited(_resumeLocal());
+        },
+      ),
+    );
+    _castDialogOpen = false;
+    if (wasPlaying && shouldResume != false) {
+      _resumeOnForeground = true;
+      await _resumeLocal();
+      _resumeOnForeground = false;
+    }
   }
 
   @override
@@ -282,13 +383,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             IconButton(
-              onPressed: () => showDialog<void>(
-                context: context,
-                builder: (_) => CastDialog(
-                  channel: widget.channel,
-                  channels: widget.channels,
-                ),
-              ),
+              onPressed: _openCastDialog,
               color: Colors.white,
               tooltip: 'Transmitir para TV',
               icon: const Icon(Icons.cast),
