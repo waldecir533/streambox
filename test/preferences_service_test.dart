@@ -1,10 +1,32 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:streambox/models/channel.dart';
 import 'package:streambox/services/preferences_service.dart';
 
+class _MockPathProvider extends PathProviderPlatform {
+  _MockPathProvider(this.directory);
+  final Directory directory;
+
+  @override
+  Future<String?> getApplicationDocumentsPath() async => directory.path;
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  late Directory tempDir;
+  setUp(() {
+    tempDir = Directory.systemTemp.createTempSync('streambox_test_');
+    PathProviderPlatform.instance = _MockPathProvider(tempDir);
+  });
+  tearDown(() {
+    try {
+      tempDir.deleteSync(recursive: true);
+    } catch (_) {}
+  });
 
   test('persists and restores the cached channel list', () async {
     SharedPreferences.setMockInitialValues({});
