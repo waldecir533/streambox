@@ -208,11 +208,11 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           if (_savedCount != null) Padding(
             padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
-            child: Text('$_savedCount canais salvos${_skippedLines != null && _skippedLines! > 0 ? ' (${_skippedLines} linhas ignoradas)' : ''}.'),
+            child: Text('$_savedCount canais salvos${_skippedLines != null && _skippedLines! > 0 ? ' ($_skippedLines linhas ignoradas)' : ''}.'),
           ),
         ]),
       if (_error != null) Padding(padding: const EdgeInsets.all(12), child: Row(children: [Expanded(child: Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error))), if (_retryPlaylistUrl != null) TextButton.icon(onPressed: _loading ? null : () => _loadM3u(_retryPlaylistUrl!), icon: const Icon(Icons.refresh), label: const Text('Tentar novamente'))])),
-      if (_view == LibraryView.channels && _memoGroups.isNotEmpty) SizedBox(height: 52, child: ListView(scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 12), children: [FilterChip(label: const Text('Todos'), selected: _group == null, onSelected: (_) => setState(() => _group = null)), const SizedBox(width: 8), ..._memoGroups.map<Widget>((g) => Padding(padding: const EdgeInsets.only(right: 8), child: FilterChip(label: Text(g), selected: _group == g, onSelected: (_) => setState(() => _group = g)))).toList()])),
+      if (_view == LibraryView.channels && _memoGroups.isNotEmpty) SizedBox(height: 52, child: ListView(scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 12), children: [FilterChip(label: const Text('Todos'), selected: _group == null, onSelected: (_) => setState(() => _group = null)), const SizedBox(width: 8), ..._memoGroups.map<Widget>((g) => Padding(padding: const EdgeInsets.only(right: 8), child: FilterChip(label: Text(g), selected: _group == g, onSelected: (_) => setState(() => _group = g))))])),
       Expanded(child: _channels.isEmpty ? _Welcome(onAdd: _accessDialog) : _visible.isEmpty ? const Center(child: Text('Nenhum canal encontrado.')) : ListView.builder(key: ValueKey('${_view.index}-${_group ?? ""}-${_search.text}'), itemCount: _visible.length, itemBuilder: (context, index) { final c = _visible[index]; return ListTile(leading: _Logo(c.logoUrl), title: Text(c.name), subtitle: Text(c.epgTitle ?? c.group ?? 'Ao vivo', maxLines: 1, overflow: TextOverflow.ellipsis), trailing: IconButton(tooltip: 'Favorito', onPressed: () => _favorite(c), icon: Icon(_favorites.contains(c.id) ? Icons.star : Icons.star_border, color: _favorites.contains(c.id) ? Colors.amber : null)), onTap: () => _open(c)); }))
     ])));
 }
