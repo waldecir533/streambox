@@ -11,9 +11,14 @@ enum PlayerEngine { automatic, media3, libvlc }
 enum VideoFit { contain, sixteenNine, fourThree, cover }
 
 class PlayerScreen extends StatefulWidget {
-  const PlayerScreen({super.key, required this.channel});
+  const PlayerScreen({
+    super.key,
+    required this.channel,
+    this.channels = const [],
+  });
 
   final Channel channel;
+  final List<Channel> channels;
 
   @override
   State<PlayerScreen> createState() => _PlayerScreenState();
@@ -48,6 +53,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
     final controller = VideoPlayerController.networkUrl(
       Uri.parse(widget.channel.url),
+      httpHeaders: widget.channel.headers,
       videoPlayerOptions: VideoPlayerOptions(
         mixWithOthers: false,
         allowBackgroundPlayback: false,
@@ -61,13 +67,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
       await controller.setPlaybackSpeed(_speed);
       await controller.play();
       if (mounted) setState(() => _loading = false);
-    } catch (error) {
+    } catch (_) {
       if (_preference == PlayerEngine.automatic) {
         await _startVlc();
       } else if (mounted) {
         setState(() {
           _loading = false;
-          _error = 'O player Android não conseguiu abrir este conteúdo.\n$error';
+          _error = 'Não foi possível abrir este canal com o player Android.';
         });
       }
     }
@@ -109,11 +115,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
       await controller.initialize().timeout(const Duration(seconds: 15));
       await controller.setPlaybackSpeed(_speed);
       if (mounted) setState(() => _loading = false);
-    } catch (error) {
+    } catch (_) {
       if (mounted) {
         setState(() {
           _loading = false;
-          _error = 'Nenhum motor conseguiu abrir este conteúdo.\n$error';
+          _error = 'Não foi possível reproduzir este canal. Confira sua conexão e tente novamente.';
         });
       }
     }
@@ -278,7 +284,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
             IconButton(
               onPressed: () => showDialog<void>(
                 context: context,
-                builder: (_) => CastDialog(channel: widget.channel),
+                builder: (_) => CastDialog(
+                  channel: widget.channel,
+                  channels: widget.channels,
+                ),
               ),
               color: Colors.white,
               tooltip: 'Transmitir para TV',
