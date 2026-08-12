@@ -135,7 +135,7 @@ class _CastDialogState extends State<CastDialog> {
     setState(() => _volume = value);
     try {
       if (_kind == _ConnectionKind.googleCast) {
-        await GoogleCastSessionManager.instance.setDeviceVolume(value);
+        GoogleCastSessionManager.instance.setDeviceVolume(value);
       } else if (_dlnaConnected != null) {
         await _dlna.setVolume(_dlnaConnected!, value);
       }
