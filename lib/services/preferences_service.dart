@@ -1,10 +1,15 @@
+import 'dart:convert';
+
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../models/channel.dart';
 
 class PreferencesService {
   static const _favoritesKey = 'favorite_channel_ids';
   static const _historyKey = 'history_channel_ids';
   static const _playlistKey = 'playlist_url';
   static const _epgKey = 'epg_url';
+  static const _channelsKey = 'cached_channels';
 
   Future<SharedPreferences> get _prefs => SharedPreferences.getInstance();
   Future<Set<String>> favorites() async => (await _prefs).getStringList(_favoritesKey)?.toSet() ?? {};
@@ -25,5 +30,24 @@ class PreferencesService {
   Future<String?> epgUrl() async => (await _prefs).getString(_epgKey);
   Future<void> savePlaylist(String value) async => (await _prefs).setString(_playlistKey, value);
   Future<void> saveEpg(String value) async => (await _prefs).setString(_epgKey, value);
-  Future<void> clearAccess() async { final p = await _prefs; await p.remove(_playlistKey); await p.remove(_epgKey); }
+  Future<List<Channel>> cachedChannels() async {
+    final raw = (await _prefs).getString(_channelsKey);
+    if (raw == null || raw.isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return const [];
+      return decoded
+          .whereType<Map<String, dynamic>>()
+          .map(Channel.fromJson)
+          .toList(growable: false);
+    } catch (_) {
+      return const [];
+    }
+  }
+  Future<void> saveChannels(List<Channel> channels) async =>
+      (await _prefs).setString(
+        _channelsKey,
+        jsonEncode(channels.map((channel) => channel.toJson()).toList()),
+      );
+  Future<void> clearAccess() async { final p = await _prefs; await p.remove(_playlistKey); await p.remove(_epgKey); await p.remove(_channelsKey); }
 }

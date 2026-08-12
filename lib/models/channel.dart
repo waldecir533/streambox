@@ -25,4 +25,27 @@ class Channel {
       Channel(name: name, url: url, logoUrl: logoUrl, group: group, tvgId: tvgId,
         epgTitle: epgTitle ?? this.epgTitle, epgStart: epgStart ?? this.epgStart,
         epgEnd: epgEnd ?? this.epgEnd);
+
+  Map<String, Object?> toJson() => {
+        'name': name,
+        'url': url,
+        'logoUrl': logoUrl,
+        'group': group,
+        'tvgId': tvgId,
+      };
+
+  factory Channel.fromJson(Map<String, dynamic> json) {
+    final name = json['name'];
+    final url = json['url'];
+    if (name is! String || url is! String || name.isEmpty || url.isEmpty) {
+      throw const FormatException('Canal salvo inválido.');
+    }
+    return Channel(
+      name: name,
+      url: url,
+      logoUrl: json['logoUrl'] as String?,
+      group: json['group'] as String?,
+      tvgId: json['tvgId'] as String?,
+    );
+  }
 }
