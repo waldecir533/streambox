@@ -1,5 +1,5 @@
 name: streambox
-version: 0.6.0+8
+version: 0.6.0+9
 publish_to: 'none'
 description: Flutter MVP for playing user-provided, authorized M3U/HLS streams.
 
@@ -16,6 +16,7 @@ dependencies:
   android_intent_plus: ^6.0.0
   shared_preferences: ^2.5.3
   xml: ^6.6.1
+  path_provider: ^2.1.5
 
 dev_dependencies:
   flutter_test:

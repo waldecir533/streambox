@@ -27,6 +27,7 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _loading = false;
   String? _error;
   String? _retryPlaylistUrl;
+  double? _progress;
   LibraryView _view = LibraryView.channels;
 
   @override void initState() { super.initState(); _restore(); }
@@ -50,9 +51,11 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _loadM3u(String url, {bool restoring = false}) async {
-    setState(() { _loading = true; _error = null; _retryPlaylistUrl = null; });
+    setState(() { _loading = true; _error = null; _retryPlaylistUrl = null; _progress = null; });
     try {
-      final data = await _playlist.loadFromUrl(url);
+      final data = await _playlist.loadFromUrl(url, onProgress: (p) {
+        if (mounted) setState(() => _progress = p);
+      });
       await _prefs.savePlaylist(url);
       await _prefs.saveChannels(data);
       if (mounted) {
@@ -81,7 +84,7 @@ class _HomeScreenState extends State<HomeScreen> {
         });
       }
     }
-    finally { if (mounted) setState(() => _loading = false); }
+    finally { if (mounted) setState(() { _loading = false; _progress = null; }); }
   }
 
   Future<void> _loadXtream(String server, String user, String password) async {
@@ -120,13 +123,26 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _open(Channel channel) async { await _prefs.addHistory(channel.id); _history = await _prefs.history(); if (mounted) { setState(() {}); await Navigator.push(context, MaterialPageRoute<void>(builder: (_) => PlayerScreen(channel: channel, channels: _channels))); } }
   Future<void> _favorite(Channel channel) async { final value = !_favorites.contains(channel.id); await _prefs.setFavorite(channel.id, value); _favorites = await _prefs.favorites(); if (mounted) setState(() {}); }
 
-  @override void dispose() { _playlist.dispose(); _xtream.dispose(); _search.dispose(); super.dispose(); }
+  @override void dispose() {
+    _playlist.cancelToken?.cancel();
+    _playlist.dispose();
+    _xtream.dispose();
+    _search.dispose();
+    super.dispose();
+  }
   @override Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('StreamBox'), actions: [IconButton(onPressed: _channels.isEmpty ? null : _importEpg, tooltip: 'Importar EPG', icon: const Icon(Icons.calendar_month)), IconButton(onPressed: _accessDialog, tooltip: 'Adicionar acesso', icon: const Icon(Icons.add_link)), PopupMenuButton<String>(onSelected: (value) { if (value == 'licenses') showLicensePage(context: context, applicationName: 'StreamBox', applicationVersion: '0.4.0', applicationLegalese: 'Player independente. Nenhum canal ou conteúdo é fornecido.'); if (value == 'premium') showDialog<void>(context: context, builder: (context) => AlertDialog(title: const Text('StreamBox Premium'), content: const Text('A compra será ativada pelo Google Play Billing após o cadastro dos produtos na Play Console. Nenhum pagamento externo será usado no aplicativo.'), actions: [FilledButton(onPressed: () => Navigator.pop(context), child: const Text('Entendi'))])); }, itemBuilder: (_) => const [PopupMenuItem(value: 'premium', child: ListTile(leading: Icon(Icons.workspace_premium), title: Text('Premium'))), PopupMenuItem(value: 'licenses', child: ListTile(leading: Icon(Icons.description_outlined), title: Text('Licenças')))] )]),
     bottomNavigationBar: NavigationBar(selectedIndex: _view.index, onDestinationSelected: (i) => setState(() { _view = LibraryView.values[i]; _group = null; }), destinations: const [NavigationDestination(icon: Icon(Icons.live_tv_outlined), selectedIcon: Icon(Icons.live_tv), label: 'Canais'), NavigationDestination(icon: Icon(Icons.star_outline), selectedIcon: Icon(Icons.star), label: 'Favoritos'), NavigationDestination(icon: Icon(Icons.history), label: 'Histórico')]),
     body: SafeArea(child: Column(children: [
       Padding(padding: const EdgeInsets.fromLTRB(16, 12, 16, 6), child: SearchBar(controller: _search, hintText: 'Buscar canal ou categoria', leading: const Icon(Icons.search), trailing: [if (_search.text.isNotEmpty) IconButton(onPressed: () { _search.clear(); setState(() {}); }, icon: const Icon(Icons.close))], onChanged: (_) => setState(() {}))),
-      if (_loading) const LinearProgressIndicator(),
+      if (_loading)
+        Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          const LinearProgressIndicator(),
+          if (_progress != null) Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+            child: Text('Analisando a lista… ${( _progress! * 100).round()}%'),
+          ),
+        ]),
       if (_error != null) Padding(padding: const EdgeInsets.all(12), child: Row(children: [Expanded(child: Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error))), if (_retryPlaylistUrl != null) TextButton.icon(onPressed: _loading ? null : () => _loadM3u(_retryPlaylistUrl!), icon: const Icon(Icons.refresh), label: const Text('Tentar novamente'))])),
       if (_view == LibraryView.channels && _groups.isNotEmpty) SizedBox(height: 52, child: ListView(scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 12), children: [FilterChip(label: const Text('Todos'), selected: _group == null, onSelected: (_) => setState(() => _group = null)), const SizedBox(width: 8), ..._groups.map((g) => Padding(padding: const EdgeInsets.only(right: 8), child: FilterChip(label: Text(g), selected: _group == g, onSelected: (_) => setState(() => _group = g))))])),
       Expanded(child: _channels.isEmpty ? _Welcome(onAdd: _accessDialog) : _visible.isEmpty ? const Center(child: Text('Nenhum canal encontrado.')) : ListView.builder(itemCount: _visible.length, itemBuilder: (context, index) { final c = _visible[index]; return ListTile(leading: _Logo(c.logoUrl), title: Text(c.name), subtitle: Text(c.epgTitle ?? c.group ?? 'Ao vivo', maxLines: 1, overflow: TextOverflow.ellipsis), trailing: IconButton(tooltip: 'Favorito', onPressed: () => _favorite(c), icon: Icon(_favorites.contains(c.id) ? Icons.star : Icons.star_border, color: _favorites.contains(c.id) ? Colors.amber : null)), onTap: () => _open(c)); }))

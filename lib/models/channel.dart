@@ -37,6 +37,13 @@ class Channel {
         'headers': headers,
       };
 
+  /// Constrói a partir de um mapa bruto gerado pelo parser (aceita o mesmo
+  /// formato de [fromJson], mas com valores opcionais sempre válidos).
+  factory Channel.fromJsonMap(Map<String, dynamic> json) {
+    final raw = json.map((key, value) => MapEntry(key.toString(), value));
+    return Channel.fromJson(Map<String, dynamic>.unmodifiable(raw));
+  }
+
   factory Channel.fromJson(Map<String, dynamic> json) {
     final name = json['name'];
     final url = json['url'];

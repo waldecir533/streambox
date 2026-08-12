@@ -1,11 +1,106 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:isolate';
 
 import '../models/channel.dart';
 
 class M3uParser {
   const M3uParser();
 
+  /// Analisa a playlist de forma assíncrona em um **Isolate** separado,
+  /// liberando a thread principal para manter a interface fluida mesmo com
+  /// listas gigantes (centenas de milhares de linhas).
+  ///
+  /// [timeout] limita o tempo total de análise; [cancelToken] permite
+  /// cancelar a análise (por exemplo, quando a tela é fechada).
+  /// [onProgress] recebe frações de progresso entre 0.0 e 1.0 quando
+  /// disponível.
+  Future<List<Channel>> parseAsync(
+    String source, {
+    Duration timeout = const Duration(minutes: 2),
+    CancelToken? cancelToken,
+    void Function(double progress)? onProgress,
+  }) async {
+    final token = cancelToken ?? CancelToken();
+    final completer = Completer<List<Channel>>();
+    onProgress?.call(0.0);
+
+    final receivePort = ReceivePort();
+    late Timer timeoutTimer;
+
+    timeoutTimer = Timer(timeout, () {
+      if (!completer.isCompleted) {
+        receivePort.close();
+        completer.completeError(TimeoutException(
+          'A análise da lista demorou mais que o esperado.',
+        ));
+      }
+    });
+
+    token.addListener(() {
+      if (!completer.isCompleted) {
+        receivePort.close();
+        timeoutTimer.cancel();
+        completer.completeError(const FormatException('Análise cancelada.'));
+      }
+    });
+
+    // O Isolate é criado em modo "spawn", com capacidade limitada de
+    // alocação e tempo de CPU, para não prejudicar o restante do aparelho.
+    Isolate.spawn<SendPort>(
+      _parseEntryPoint,
+      receivePort.sendPort,
+      debugName: 'm3u_parser',
+      errorsAreFatal: false,
+    ).then((isolate) {
+      SendPort? inputPort;
+      receivePort.listen((message) {
+        if (message is SendPort) {
+          inputPort = message;
+          inputPort!.send(source);
+          return;
+        }
+        if (message is List<Map<String, dynamic>>) {
+          timeoutTimer.cancel();
+          receivePort.close();
+          if (!completer.isCompleted) {
+            onProgress?.call(1.0);
+            completer.complete(
+              message.map(Channel.fromJsonMap).toList(),
+            );
+          }
+        } else if (message is String) {
+          timeoutTimer.cancel();
+          receivePort.close();
+          if (!completer.isCompleted) {
+            completer.completeError(
+              FormatException('Não foi possível analisar a lista: $message'),
+            );
+          }
+        }
+      }, onError: (_) {
+        // Erros de escuta são tratados pelo timeout/cancelamento.
+      });
+    }, onError: (error) {
+      timeoutTimer.cancel();
+      receivePort.close();
+      if (!completer.isCompleted) {
+        completer.completeError(
+          const FormatException('Não foi possível iniciar a análise da lista.'),
+        );
+      }
+    });
+
+    return completer.future;
+  }
+
+  /// Análise síncrona (para testes e fontes já pequenas).
   List<Channel> parse(String source) {
+    final rawChannels = _parseRaw(source);
+    return rawChannels.map(Channel.fromJsonMap).toList();
+  }
+
+  static List<Map<String, dynamic>> _parseRaw(String source) {
     final lines = source
         .replaceAll('\r\n', '\n')
         .replaceAll('\r', '\n')
@@ -14,7 +109,11 @@ class M3uParser {
         .where((line) => line.isNotEmpty)
         .toList();
 
-    final channels = <Channel>[];
+    if (lines.isEmpty) {
+      throw const FormatException('O arquivo está vazio.');
+    }
+
+    final channels = <Map<String, dynamic>>[];
     String? pendingInfo;
     final pendingHeaders = <String, String>{};
 
@@ -57,7 +156,9 @@ class M3uParser {
             }
           }
         } on FormatException {
-          // Ignore malformed optional header metadata and keep parsing.
+          // Ignora metadados opcionais malformados e continua a análise.
+        } catch (_) {
+          // Qualquer outro erro de leitura de cabeçalhos é ignorado.
         }
         continue;
       }
@@ -67,16 +168,20 @@ class M3uParser {
       }
 
       if (pendingInfo != null && _looksLikeUrl(line)) {
-        channels.add(_buildChannel(pendingInfo, line, pendingHeaders));
+        channels.add(_buildChannelMap(pendingInfo, line, pendingHeaders));
         pendingInfo = null;
         pendingHeaders.clear();
       }
     }
 
+    if (channels.isEmpty) {
+      throw const FormatException('Nenhum canal válido foi encontrado.');
+    }
+
     return channels;
   }
 
-  Channel _buildChannel(
+  static Map<String, dynamic> _buildChannelMap(
     String info,
     String url,
     Map<String, String> headers,
@@ -93,20 +198,62 @@ class M3uParser {
       return value == null || value.isEmpty ? null : value;
     }
 
-    return Channel(
-      name: name.isEmpty ? 'Canal' : name,
-      url: url,
-      logoUrl: attribute('tvg-logo'),
-      group: attribute('group-title'),
-      tvgId: attribute('tvg-id'),
-      headers: Map.unmodifiable(headers),
-    );
+    return <String, dynamic>{
+      'name': name.isEmpty ? 'Canal' : name,
+      'url': url,
+      'logoUrl': attribute('tvg-logo'),
+      'group': attribute('group-title'),
+      'tvgId': attribute('tvg-id'),
+      'headers': Map<String, String>.unmodifiable(headers),
+    };
   }
 
-  bool _looksLikeUrl(String value) {
+  static bool _looksLikeUrl(String value) {
     final uri = Uri.tryParse(value);
     return uri != null &&
         uri.hasScheme &&
         (uri.scheme == 'http' || uri.scheme == 'https');
+  }
+
+  /// Função de entrada do Isolate — o Dart cria automaticamente um ReceivePort
+  /// interno e passa o SendPort correspondente como argumento; o isolate
+  /// escuta esse SendPort para receber o texto da playlist.
+  static void _parseEntryPoint(SendPort replyPort) async {
+    final inputPort = ReceivePort();
+    replyPort.send(inputPort.sendPort);
+    await for (final message in inputPort) {
+      if (message is! String) continue;
+      try {
+        replyPort.send(await Isolate.run(() => _parseRaw(message)));
+      } catch (error) {
+        replyPort.send(error.toString());
+      }
+      inputPort.close();
+      return;
+    }
+  }
+}
+
+/// Token simples para cancelar operações assíncronas longas.
+class CancelToken {
+  final List<void Function()> _listeners = [];
+  bool _cancelled = false;
+
+  bool get isCancelled => _cancelled;
+
+  void addListener(void Function() callback) {
+    if (_cancelled) {
+      callback();
+    } else {
+      _listeners.add(callback);
+    }
+  }
+
+  void cancel() {
+    if (_cancelled) return;
+    _cancelled = true;
+    for (final callback in _listeners) {
+      callback();
+    }
   }
 }

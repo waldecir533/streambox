@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/channel.dart';
@@ -44,10 +45,14 @@ class PreferencesService {
       return const [];
     }
   }
-  Future<void> saveChannels(List<Channel> channels) async =>
-      (await _prefs).setString(
-        _channelsKey,
-        jsonEncode(channels.map((channel) => channel.toJson()).toList()),
-      );
+  /// Serializa e salva os canais em um Isolate separado, evitando travar a
+  /// interface ao persistir listas grandes.
+  Future<void> saveChannels(List<Channel> channels) async {
+    final serialized = await compute(_encodeChannels, channels);
+    await (await _prefs).setString(_channelsKey, serialized);
+  }
+
+  static String _encodeChannels(List<Channel> channels) =>
+      jsonEncode(channels.map((channel) => channel.toJson()).toList());
   Future<void> clearAccess() async { final p = await _prefs; await p.remove(_playlistKey); await p.remove(_epgKey); await p.remove(_channelsKey); }
 }
