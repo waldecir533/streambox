@@ -41,6 +41,34 @@ void main() {
     await service.dispose();
   });
 
+  test('DLNA diagnostic reports every accepted stage using public MP4',
+      () async {
+    final actions = <String>[];
+    final stages = <DlnaTestStage>[];
+    final client = MockClient((request) async {
+      actions.add(request.headers['soapaction'] ?? '');
+      expect(request.headers['authorization'], isNull);
+      expect(request.body, isNot(contains('Bearer')));
+      if (actions.length == 1) {
+        expect(request.body, contains('SetAVTransportURI'));
+        expect(request.body, contains('media.w3.org'));
+        expect(request.body, contains('video/mp4'));
+      }
+      return http.Response('', 200);
+    });
+    final service = DlnaService(client: client);
+
+    await service.testPublicVideo(device, onStage: stages.add);
+
+    expect(stages, DlnaTestStage.values);
+    expect(actions, [
+      '"urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI"',
+      '"urn:schemas-upnp-org:service:AVTransport:1#Play"',
+    ]);
+    expect(service.connectedDevice, device);
+    await service.dispose();
+  });
+
   test('uses AVTransport service type and controlURL advertised by Samsung', () async {
     final service = DlnaService();
     const description = '''

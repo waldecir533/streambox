@@ -53,6 +53,8 @@ class DlnaDevice {
 
 enum DlnaErrorKind { authorization, connection, incompatibleFormat }
 
+enum DlnaTestStage { tvFound, setUriAccepted, playAccepted }
+
 class DlnaException implements Exception {
   const DlnaException(this.message, {this.kind = DlnaErrorKind.connection});
   final String message;
@@ -86,6 +88,9 @@ class DlnaService {
   int _discoveryGeneration = 0;
   bool _disposed = false;
   DlnaDevice? connectedDevice;
+
+  static const diagnosticVideoUrl =
+      'https://media.w3.org/2010/05/sintel/trailer.mp4';
 
   Stream<List<DlnaDevice>> get devices => _devicesController.stream;
 
@@ -351,6 +356,50 @@ class DlnaService {
       },
     );
     await play(device);
+  }
+
+  Future<void> testPublicVideo(
+    DlnaDevice device, {
+    required void Function(DlnaTestStage stage) onStage,
+  }) async {
+    const channel = Channel(
+      name: 'Teste DLNA — Sintel',
+      url: diagnosticVideoUrl,
+    );
+    developer.log(
+      'Iniciando teste DLNA público em ${device.name}',
+      name: 'StreamBox.DLNA.Test',
+    );
+    onStage(DlnaTestStage.tvFound);
+    try {
+      const mimeType = 'video/mp4';
+      await _verifyProtocol(device, mimeType).timeout(connectionTimeout);
+      final remoteUrl = Uri.parse(diagnosticVideoUrl);
+      await _soap(
+        device.avTransportControlUrl,
+        device.avTransportServiceType,
+        'SetAVTransportURI',
+        {
+          'InstanceID': '0',
+          'CurrentURI': remoteUrl.toString(),
+          'CurrentURIMetaData': _didlMetadata(channel, remoteUrl),
+        },
+      );
+      onStage(DlnaTestStage.setUriAccepted);
+      await play(device);
+      onStage(DlnaTestStage.playAccepted);
+      connectedDevice = device;
+      developer.log(
+        'Teste DLNA concluído com sucesso',
+        name: 'StreamBox.DLNA.Test',
+      );
+    } on TimeoutException {
+      developer.log(
+        'Timeout no teste DLNA',
+        name: 'StreamBox.DLNA.Test',
+      );
+      throw const DlnaException('O teste DLNA excedeu o tempo limite.');
+    }
   }
 
   Future<void> play(DlnaDevice device) => _soap(

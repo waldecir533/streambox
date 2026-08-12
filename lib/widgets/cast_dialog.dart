@@ -53,6 +53,10 @@ class _CastDialogState extends State<CastDialog> {
   Timer? _positionTimer;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
+  DlnaDevice? _testDevice;
+  final Set<DlnaTestStage> _testStages = {};
+  bool _testRunning = false;
+  bool _testFinished = false;
 
   @override
   void initState() {
@@ -102,6 +106,35 @@ class _CastDialogState extends State<CastDialog> {
       _message = 'Transmitindo para ${device.name}.';
       _startPositionPolling();
     });
+  }
+
+  Future<void> _testDlna(DlnaDevice device) async {
+    if (_busy || _testRunning) return;
+    widget.onConnectionStarted?.call();
+    setState(() {
+      _testDevice = device;
+      _testStages.clear();
+      _testRunning = true;
+      _testFinished = false;
+    });
+    await _runRemoteAction(() async {
+      await _dlna.testPublicVideo(
+        device,
+        onStage: (stage) {
+          if (mounted) setState(() => _testStages.add(stage));
+        },
+      );
+      _dlnaConnected = device;
+      _kind = _ConnectionKind.dlna;
+      _playing = true;
+      _message = 'Teste DLNA concluído. O vídeo público está na TV.';
+    });
+    if (mounted) {
+      setState(() {
+        _testRunning = false;
+        _testFinished = true;
+      });
+    }
   }
 
   Future<void> _runRemoteAction(Future<void> Function() action) async {
@@ -189,6 +222,8 @@ class _CastDialogState extends State<CastDialog> {
       setState(() {
         _busy = false;
         _discovering = false;
+        _testRunning = false;
+        _testFinished = _testDevice != null;
         _message = 'Conexão cancelada.';
         _kind = null;
         _dlnaConnected = null;
@@ -377,6 +412,7 @@ class _CastDialogState extends State<CastDialog> {
                     child: Text(_message!),
                   ),
                 ),
+              if (_testDevice != null) _dlnaTestStatus(),
               if (_kind != null) _remoteControls(),
               const Padding(
                 padding: EdgeInsets.only(top: 20, bottom: 8),
@@ -433,6 +469,14 @@ class _CastDialogState extends State<CastDialog> {
                           onTap: () => target.castDevice != null
                               ? _connectCast(target.castDevice!)
                               : _connectDlna(target.dlnaDevice!),
+                          trailing: target.dlnaDevice == null
+                              ? null
+                              : TextButton(
+                                  onPressed: _busy || _testRunning
+                                      ? null
+                                      : () => _testDlna(target.dlnaDevice!),
+                                  child: const Text('Teste DLNA'),
+                                ),
                         ),
                     ],
                   );
@@ -519,6 +563,68 @@ class _CastDialogState extends State<CastDialog> {
                 if (channel != null) _changeChannel(channel);
               },
             ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _dlnaTestStatus() {
+    Widget stage(DlnaTestStage value, String label) {
+      final accepted = _testStages.contains(value);
+      final firstMissing = DlnaTestStage.values
+          .where((stage) => !_testStages.contains(stage))
+          .firstOrNull;
+      final failed = _testFinished && !accepted && value == firstMissing;
+      final skipped = _testFinished && !accepted && !failed;
+      return ListTile(
+        dense: true,
+        leading: Icon(
+          accepted
+              ? Icons.check_circle
+              : failed
+                  ? Icons.error_outline
+                  : skipped
+                      ? Icons.block
+                      : Icons.pending_outlined,
+          color: accepted
+              ? Colors.green
+              : failed
+                  ? Theme.of(context).colorScheme.error
+                  : null,
+        ),
+        title: Text(label),
+        subtitle: Text(
+          accepted
+              ? 'Aceito'
+              : failed
+                  ? 'Falhou'
+                  : skipped
+                      ? 'Não executado'
+                      : 'Aguardando',
+        ),
+      );
+    }
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(8),
+              child: Text(
+                'Teste DLNA — ${_testDevice!.name}',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+            ),
+            stage(DlnaTestStage.tvFound, 'TV encontrada'),
+            stage(
+              DlnaTestStage.setUriAccepted,
+              'SetAVTransportURI aceito',
+            ),
+            stage(DlnaTestStage.playAccepted, 'Comando Play aceito'),
           ],
         ),
       ),
