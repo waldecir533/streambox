@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import '../models/channel.dart';
 
@@ -8,11 +9,16 @@ class StreamProxyService {
   HttpServer? _server;
   String? _host;
   final Map<String, Map<String, String>> _headersByToken = {};
+  final Map<String, Uri> _targetsByToken = {};
 
   Future<Uri> urlFor(Channel channel) async {
     await _ensureStarted();
-    final token = base64Url.encode(utf8.encode(channel.url)).replaceAll('=', '');
+    final random = Random.secure();
+    final token = base64Url
+        .encode(List<int>.generate(24, (_) => random.nextInt(256)))
+        .replaceAll('=', '');
     _headersByToken[token] = channel.headers;
+    _targetsByToken[token] = Uri.parse(channel.url);
     return Uri(
       scheme: 'http',
       host: _host,
@@ -51,9 +57,12 @@ class StreamProxyService {
         return;
       }
       final token = request.uri.pathSegments[1];
-      final target = Uri.parse(
-        utf8.decode(base64Url.decode(base64Url.normalize(token))),
-      );
+      final target = _targetsByToken[token];
+      if (target == null) {
+        request.response.statusCode = HttpStatus.notFound;
+        await request.response.close();
+        return;
+      }
       final headers = _headersByToken[token] ?? const <String, String>{};
       await _forward(request, target, headers);
     } catch (_) {
@@ -123,6 +132,7 @@ class StreamProxyService {
 
   Future<void> dispose() async {
     _headersByToken.clear();
+    _targetsByToken.clear();
     await _server?.close(force: true);
     _server = null;
   }
