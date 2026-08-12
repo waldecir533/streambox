@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import '../models/channel.dart';
 import '../services/epg_service.dart';
@@ -24,14 +26,16 @@ class _HomeScreenState extends State<HomeScreen> {
   String? _group;
   bool _loading = false;
   String? _error;
+  String? _retryPlaylistUrl;
   LibraryView _view = LibraryView.channels;
 
   @override void initState() { super.initState(); _restore(); }
   Future<void> _restore() async {
     _favorites = await _prefs.favorites(); _history = await _prefs.history();
+    _channels = await _prefs.cachedChannels();
     final url = await _prefs.playlistUrl();
     if (mounted) setState(() {});
-    if (url != null && url.isNotEmpty) await _loadM3u(url, quiet: true);
+    if (url != null && url.isNotEmpty) await _loadM3u(url, restoring: true);
   }
 
   List<String> get _groups => (_channels.map((c) => c.group).whereType<String>().where((v) => v.isNotEmpty).toSet().toList()..sort());
@@ -45,17 +49,37 @@ class _HomeScreenState extends State<HomeScreen> {
     return result.toList();
   }
 
-  Future<void> _loadM3u(String url, {bool quiet = false}) async {
-    setState(() { _loading = true; _error = null; });
-    try { final data = await _playlist.loadFromUrl(url); await _prefs.savePlaylist(url); if (mounted) setState(() => _channels = data); }
-    catch (e) { if (mounted && !quiet) setState(() => _error = e.toString().replaceFirst('Exception: ', '')); }
+  Future<void> _loadM3u(String url, {bool restoring = false}) async {
+    setState(() { _loading = true; _error = null; _retryPlaylistUrl = null; });
+    try {
+      final data = await _playlist.loadFromUrl(url);
+      await _prefs.savePlaylist(url);
+      await _prefs.saveChannels(data);
+      if (mounted) setState(() => _channels = data);
+    } on TimeoutException {
+      if (mounted) setState(() {
+        _error = restoring && _channels.isNotEmpty
+            ? 'Não foi possível atualizar a lista agora. Exibindo os canais salvos.'
+            : 'A conexão demorou mais que o esperado. Verifique sua internet e tente novamente.';
+        _retryPlaylistUrl = url;
+      });
+    } on FormatException {
+      if (mounted) setState(() => _error = 'Não foi possível ler essa lista. Confira o endereço e tente novamente.');
+    } catch (_) {
+      if (mounted) setState(() {
+        _error = restoring && _channels.isNotEmpty
+            ? 'Não foi possível atualizar a lista agora. Exibindo os canais salvos.'
+            : 'Não foi possível carregar a lista. Verifique sua conexão e tente novamente.';
+        _retryPlaylistUrl = url;
+      });
+    }
     finally { if (mounted) setState(() => _loading = false); }
   }
 
   Future<void> _loadXtream(String server, String user, String password) async {
     setState(() { _loading = true; _error = null; });
     try { final data = await _xtream.load(server: server, username: user, password: password); if (mounted) setState(() => _channels = data); }
-    catch (e) { if (mounted) setState(() => _error = e.toString().replaceFirst('Exception: ', '')); }
+    catch (_) { if (mounted) setState(() => _error = 'Não foi possível entrar. Confira os dados e sua conexão.'); }
     finally { if (mounted) setState(() => _loading = false); }
   }
 
@@ -69,7 +93,7 @@ class _HomeScreenState extends State<HomeScreen> {
     controller.dispose(); if (url == null || url.trim().isEmpty) return;
     setState(() => _loading = true);
     try { final epg = EpgService(); final now = await epg.loadNow(url); await _prefs.saveEpg(url); if (mounted) setState(() => _channels = epg.apply(_channels, now)); }
-    catch (e) { if (mounted) setState(() => _error = e.toString().replaceFirst('Exception: ', '')); }
+    catch (_) { if (mounted) setState(() => _error = 'Não foi possível atualizar o guia agora. Tente novamente mais tarde.'); }
     finally { if (mounted) setState(() => _loading = false); }
   }
 
@@ -95,7 +119,7 @@ class _HomeScreenState extends State<HomeScreen> {
     body: SafeArea(child: Column(children: [
       Padding(padding: const EdgeInsets.fromLTRB(16, 12, 16, 6), child: SearchBar(controller: _search, hintText: 'Buscar canal ou categoria', leading: const Icon(Icons.search), trailing: [if (_search.text.isNotEmpty) IconButton(onPressed: () { _search.clear(); setState(() {}); }, icon: const Icon(Icons.close))], onChanged: (_) => setState(() {}))),
       if (_loading) const LinearProgressIndicator(),
-      if (_error != null) Padding(padding: const EdgeInsets.all(12), child: Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error))),
+      if (_error != null) Padding(padding: const EdgeInsets.all(12), child: Row(children: [Expanded(child: Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error))), if (_retryPlaylistUrl != null) TextButton.icon(onPressed: _loading ? null : () => _loadM3u(_retryPlaylistUrl!), icon: const Icon(Icons.refresh), label: const Text('Tentar novamente'))])),
       if (_view == LibraryView.channels && _groups.isNotEmpty) SizedBox(height: 52, child: ListView(scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 12), children: [FilterChip(label: const Text('Todos'), selected: _group == null, onSelected: (_) => setState(() => _group = null)), const SizedBox(width: 8), ..._groups.map((g) => Padding(padding: const EdgeInsets.only(right: 8), child: FilterChip(label: Text(g), selected: _group == g, onSelected: (_) => setState(() => _group = g))))])),
       Expanded(child: _channels.isEmpty ? _Welcome(onAdd: _accessDialog) : _visible.isEmpty ? const Center(child: Text('Nenhum canal encontrado.')) : ListView.builder(itemCount: _visible.length, itemBuilder: (context, index) { final c = _visible[index]; return ListTile(leading: _Logo(c.logoUrl), title: Text(c.name), subtitle: Text(c.epgTitle ?? c.group ?? 'Ao vivo', maxLines: 1, overflow: TextOverflow.ellipsis), trailing: IconButton(tooltip: 'Favorito', onPressed: () => _favorite(c), icon: Icon(_favorites.contains(c.id) ? Icons.star : Icons.star_border, color: _favorites.contains(c.id) ? Colors.amber : null)), onTap: () => _open(c)); }))
     ])));
