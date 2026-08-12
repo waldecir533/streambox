@@ -26,13 +26,25 @@ class CastService {
     }
     final lowerUrl = channel.url.toLowerCase();
     final isHls = lowerUrl.contains('.m3u8');
+    final contentType = isHls
+        ? 'application/x-mpegURL'
+        : lowerUrl.contains('.mp4') || lowerUrl.contains('.m4v')
+            ? 'video/mp4'
+            : lowerUrl.contains('.ts')
+                ? 'video/mp2t'
+                : null;
+    if (contentType == null) {
+      throw const FormatException(
+        'Formato incompatível com transmissão para TV.',
+      );
+    }
     final remoteUrl = channel.headers.isEmpty
         ? Uri.parse(channel.url)
         : await _proxy.urlFor(channel);
     final media = GoogleCastMediaInformation(
       contentId: remoteUrl.toString(),
       contentUrl: remoteUrl,
-      contentType: isHls ? 'application/x-mpegURL' : 'video/mp4',
+      contentType: contentType,
       streamType: CastMediaStreamType.live,
       customData: channel.headers.isEmpty ? null : {'headers': channel.headers},
       metadata: GoogleCastMovieMediaMetadata(
@@ -62,6 +74,18 @@ class CastService {
   static Future<void> pause() => GoogleCastRemoteMediaClient.instance.pause();
 
   static Future<void> stop() => GoogleCastRemoteMediaClient.instance.stop();
+
+  static Duration get position =>
+      GoogleCastRemoteMediaClient.instance.playerPosition;
+
+  static Duration get duration =>
+      GoogleCastRemoteMediaClient.instance.mediaStatus?.mediaInformation?.duration ??
+      Duration.zero;
+
+  static Future<void> seek(Duration position) =>
+      GoogleCastRemoteMediaClient.instance.seek(
+        GoogleCastMediaSeekOption(position: position),
+      );
 
   static Future<void> openAndroidScreenMirroring() async {
     if (!Platform.isAndroid) return;

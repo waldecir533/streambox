@@ -7,7 +7,15 @@ import 'package:http/http.dart' as http;
 import 'package:xml/xml.dart';
 
 import '../models/channel.dart';
-import 'stream_proxy_service.dart';
+import 'tv_stream_resolver.dart';
+
+enum TvBrand { samsung, lg, tcl, philco, sempToshiba, androidTv, googleTv, other }
+
+class DlnaPosition {
+  const DlnaPosition({required this.position, required this.duration});
+  final Duration position;
+  final Duration duration;
+}
 
 class DlnaDevice {
   const DlnaDevice({
@@ -15,15 +23,21 @@ class DlnaDevice {
     required this.name,
     required this.location,
     required this.avTransportControlUrl,
+    this.connectionManagerControlUrl,
     this.renderingControlUrl,
     this.model,
+    this.manufacturer,
+    this.brand = TvBrand.other,
   });
 
   final String id;
   final String name;
   final String? model;
+  final String? manufacturer;
+  final TvBrand brand;
   final Uri location;
   final Uri avTransportControlUrl;
+  final Uri? connectionManagerControlUrl;
   final Uri? renderingControlUrl;
 }
 
@@ -47,7 +61,7 @@ class DlnaService {
   final Duration connectionTimeout;
   final _devicesController = StreamController<List<DlnaDevice>>.broadcast();
   final Map<String, DlnaDevice> _devices = {};
-  final StreamProxyService _proxy = StreamProxyService();
+  final TvStreamResolver _streamResolver = TvStreamResolver();
   RawDatagramSocket? _socket;
   Timer? _finishTimer;
   Completer<void>? _discoveryCompleter;
@@ -150,6 +164,7 @@ class DlnaService {
     final services = deviceNode.findAllElements('service');
     Uri? avTransport;
     Uri? rendering;
+    Uri? connectionManager;
     for (final service in services) {
       final type = service.getElement('serviceType')?.innerText ?? '';
       final control = service.getElement('controlURL')?.innerText.trim();
@@ -157,16 +172,34 @@ class DlnaService {
       final resolved = location.resolve(control);
       if (type.contains(':AVTransport:')) avTransport = resolved;
       if (type.contains(':RenderingControl:')) rendering = resolved;
+      if (type.contains(':ConnectionManager:')) connectionManager = resolved;
     }
     if (avTransport == null) return null;
+    final manufacturer = deviceNode.getElement('manufacturer')?.innerText.trim();
+    final model = deviceNode.getElement('modelName')?.innerText.trim();
     return DlnaDevice(
       id: deviceNode.getElement('UDN')?.innerText.trim() ?? location.toString(),
       name: deviceNode.getElement('friendlyName')?.innerText.trim() ?? 'Smart TV',
-      model: deviceNode.getElement('modelName')?.innerText.trim(),
+      model: model,
+      manufacturer: manufacturer,
+      brand: _detectBrand('$manufacturer $model'),
       location: location,
       avTransportControlUrl: avTransport,
       renderingControlUrl: rendering,
+      connectionManagerControlUrl: connectionManager,
     );
+  }
+
+  TvBrand _detectBrand(String description) {
+    final value = description.toLowerCase();
+    if (value.contains('samsung')) return TvBrand.samsung;
+    if (value.contains('lg') || value.contains('webos')) return TvBrand.lg;
+    if (value.contains('tcl')) return TvBrand.tcl;
+    if (value.contains('philco')) return TvBrand.philco;
+    if (value.contains('semp') || value.contains('toshiba')) return TvBrand.sempToshiba;
+    if (value.contains('google tv')) return TvBrand.googleTv;
+    if (value.contains('android')) return TvBrand.androidTv;
+    return TvBrand.other;
   }
 
   Future<void> connect(DlnaDevice device, Channel channel) async {
@@ -191,9 +224,9 @@ class DlnaService {
   }
 
   Future<void> setChannel(DlnaDevice device, Channel channel) async {
-    final remoteUrl = channel.headers.isEmpty
-        ? Uri.parse(channel.url)
-        : await _proxy.urlFor(channel);
+    final mimeType = _mimeType(channel.url);
+    await _verifyProtocol(device, mimeType);
+    final remoteUrl = await _streamResolver.resolve(channel);
     final metadata = _didlMetadata(channel, remoteUrl);
     await _soap(
       device.avTransportControlUrl,
@@ -213,21 +246,21 @@ class DlnaService {
         'urn:schemas-upnp-org:service:AVTransport:1',
         'Play',
         {'InstanceID': '0', 'Speed': '1'},
-      );
+      ).then((_) {});
 
   Future<void> pause(DlnaDevice device) => _soap(
         device.avTransportControlUrl,
         'urn:schemas-upnp-org:service:AVTransport:1',
         'Pause',
         {'InstanceID': '0'},
-      );
+      ).then((_) {});
 
   Future<void> stop(DlnaDevice device) => _soap(
         device.avTransportControlUrl,
         'urn:schemas-upnp-org:service:AVTransport:1',
         'Stop',
         {'InstanceID': '0'},
-      );
+      ).then((_) {});
 
   Future<void> setVolume(DlnaDevice device, double volume) async {
     final url = device.renderingControlUrl;
@@ -246,6 +279,78 @@ class DlnaService {
     );
   }
 
+  Future<DlnaPosition> position(DlnaDevice device) async {
+    final response = await _soap(
+      device.avTransportControlUrl,
+      'urn:schemas-upnp-org:service:AVTransport:1',
+      'GetPositionInfo',
+      {'InstanceID': '0'},
+    );
+    final document = XmlDocument.parse(response.body);
+    return DlnaPosition(
+      position: _parseUpnpDuration(document.findAllElements('RelTime').firstOrNull?.innerText),
+      duration: _parseUpnpDuration(document.findAllElements('TrackDuration').firstOrNull?.innerText),
+    );
+  }
+
+  Future<void> seek(DlnaDevice device, Duration position) => _soap(
+        device.avTransportControlUrl,
+        'urn:schemas-upnp-org:service:AVTransport:1',
+        'Seek',
+        {
+          'InstanceID': '0',
+          'Unit': 'REL_TIME',
+          'Target': _formatUpnpDuration(position),
+        },
+      ).then((_) {});
+
+  Future<void> _verifyProtocol(DlnaDevice device, String mimeType) async {
+    final url = device.connectionManagerControlUrl;
+    if (url == null) return;
+    final response = await _soap(
+      url,
+      'urn:schemas-upnp-org:service:ConnectionManager:1',
+      'GetProtocolInfo',
+      const {},
+    );
+    final document = XmlDocument.parse(response.body);
+    final sink = document.findAllElements('Sink').firstOrNull?.innerText.toLowerCase() ?? '';
+    if (sink.isNotEmpty && !sink.contains(mimeType.toLowerCase()) && !sink.contains('*:*')) {
+      throw DlnaException(_incompatibleMessage(mimeType));
+    }
+  }
+
+  String _mimeType(String url) {
+    final path = Uri.parse(url).path.toLowerCase();
+    if (path.endsWith('.m3u8') || path.endsWith('.m3u')) {
+      return 'application/vnd.apple.mpegurl';
+    }
+    if (path.endsWith('.mp4') || path.endsWith('.m4v')) return 'video/mp4';
+    if (path.endsWith('.ts') || path.endsWith('.mpegts')) return 'video/mp2t';
+    throw const DlnaException(
+      'Este formato não é compatível com transmissão para TV. A reprodução continua no celular.',
+    );
+  }
+
+  String _incompatibleMessage(String mimeType) =>
+      'A TV não informou suporte a $mimeType. A reprodução continua no celular.';
+
+  Duration _parseUpnpDuration(String? value) {
+    final parts = value?.split(':');
+    if (parts == null || parts.length != 3) return Duration.zero;
+    final seconds = double.tryParse(parts[2])?.floor() ?? 0;
+    return Duration(
+      hours: int.tryParse(parts[0]) ?? 0,
+      minutes: int.tryParse(parts[1]) ?? 0,
+      seconds: seconds,
+    );
+  }
+
+  String _formatUpnpDuration(Duration value) {
+    String two(int number) => number.toString().padLeft(2, '0');
+    return '${two(value.inHours)}:${two(value.inMinutes.remainder(60))}:${two(value.inSeconds.remainder(60))}';
+  }
+
   Future<void> disconnect() async {
     final device = connectedDevice;
     connectedDevice = null;
@@ -256,7 +361,7 @@ class DlnaService {
     }
   }
 
-  Future<void> _soap(
+  Future<http.Response> _soap(
     Uri url,
     String serviceType,
     String action,
@@ -286,6 +391,7 @@ class DlnaService {
           'Não foi possível conectar à TV',
         );
       }
+      return response;
     } on TimeoutException {
       throw const DlnaException(
         'Não foi possível conectar à TV',
@@ -298,9 +404,7 @@ class DlnaService {
   }
 
   String _didlMetadata(Channel channel, Uri remoteUrl) {
-    final protocol = channel.url.toLowerCase().contains('.m3u8')
-        ? 'application/vnd.apple.mpegurl'
-        : 'video/mp4';
+    final protocol = _mimeType(channel.url);
     return '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
         'xmlns:dc="http://purl.org/dc/elements/1.1/" '
         'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">'
@@ -334,7 +438,7 @@ class DlnaService {
     _disposed = true;
     await stopDiscovery();
     await _devicesController.close();
-    await _proxy.dispose();
+    await _streamResolver.dispose();
     _client.close();
   }
 }

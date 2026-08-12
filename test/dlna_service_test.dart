@@ -58,4 +58,35 @@ void main() {
     );
     await service.dispose();
   });
+
+  test('checks ConnectionManager before sending an incompatible stream', () async {
+    final client = MockClient((request) async {
+      if ((request.headers['soapaction'] ?? '').contains('GetProtocolInfo')) {
+        return http.Response(
+          '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'
+          '<s:Body><u:GetProtocolInfoResponse '
+          'xmlns:u="urn:schemas-upnp-org:service:ConnectionManager:1">'
+          '<Source></Source><Sink>http-get:*:video/mp4:*</Sink>'
+          '</u:GetProtocolInfoResponse></s:Body></s:Envelope>',
+          200,
+        );
+      }
+      fail('AVTransport must not be called for an incompatible protocol');
+    });
+    final service = DlnaService(client: client);
+    final deviceWithCapabilities = DlnaDevice(
+      id: device.id,
+      name: device.name,
+      location: device.location,
+      avTransportControlUrl: device.avTransportControlUrl,
+      connectionManagerControlUrl:
+          Uri.parse('http://192.168.1.10:9197/ConnectionManager/control'),
+    );
+
+    await expectLater(
+      service.connect(deviceWithCapabilities, channel),
+      throwsA(isA<DlnaException>()),
+    );
+    await service.dispose();
+  });
 }
