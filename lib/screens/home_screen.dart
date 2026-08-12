@@ -55,23 +55,31 @@ class _HomeScreenState extends State<HomeScreen> {
       final data = await _playlist.loadFromUrl(url);
       await _prefs.savePlaylist(url);
       await _prefs.saveChannels(data);
-      if (mounted) setState(() => _channels = data);
+      if (mounted) {
+        setState(() => _channels = data);
+      }
     } on TimeoutException {
-      if (mounted) setState(() {
-        _error = restoring && _channels.isNotEmpty
-            ? 'Não foi possível atualizar a lista agora. Exibindo os canais salvos.'
-            : 'A conexão demorou mais que o esperado. Verifique sua internet e tente novamente.';
-        _retryPlaylistUrl = url;
-      });
+      if (mounted) {
+        setState(() {
+          _error = restoring && _channels.isNotEmpty
+              ? 'Não foi possível atualizar a lista agora. Exibindo os canais salvos.'
+              : 'A conexão demorou mais que o esperado. Verifique sua internet e tente novamente.';
+          _retryPlaylistUrl = url;
+        });
+      }
     } on FormatException {
-      if (mounted) setState(() => _error = 'Não foi possível ler essa lista. Confira o endereço e tente novamente.');
+      if (mounted) {
+        setState(() => _error = 'Não foi possível ler essa lista. Confira o endereço e tente novamente.');
+      }
     } catch (_) {
-      if (mounted) setState(() {
-        _error = restoring && _channels.isNotEmpty
-            ? 'Não foi possível atualizar a lista agora. Exibindo os canais salvos.'
-            : 'Não foi possível carregar a lista. Verifique sua conexão e tente novamente.';
-        _retryPlaylistUrl = url;
-      });
+      if (mounted) {
+        setState(() {
+          _error = restoring && _channels.isNotEmpty
+              ? 'Não foi possível atualizar a lista agora. Exibindo os canais salvos.'
+              : 'Não foi possível carregar a lista. Verifique sua conexão e tente novamente.';
+          _retryPlaylistUrl = url;
+        });
+      }
     }
     finally { if (mounted) setState(() => _loading = false); }
   }
