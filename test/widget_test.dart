@@ -4,12 +4,16 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:streambox/main.dart';
 
 void main() {
-  testWidgets('shows the StreamBox welcome screen', (tester) async {
+  testWidgets('shows adaptive StreamBox home and opens live TV', (tester) async {
     SharedPreferences.setMockInitialValues({});
 
     await tester.pumpWidget(const StreamBoxApp());
     await tester.pumpAndSettle();
 
+    expect(find.text('Início'), findsWidgets);
+    expect(find.text('Ir para TV ao vivo'), findsOneWidget);
+    await tester.tap(find.text('Ir para TV ao vivo'));
+    await tester.pumpAndSettle();
     expect(find.text('StreamBox'), findsOneWidget);
     expect(find.text('Adicionar acesso'), findsOneWidget);
   });
@@ -19,6 +23,8 @@ void main() {
     SharedPreferences.setMockInitialValues({});
 
     await tester.pumpWidget(const StreamBoxApp());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('TV ao vivo').last);
     await tester.pumpAndSettle();
     await tester.tap(find.byType(PopupMenuButton<String>));
     await tester.pumpAndSettle();
