@@ -24,6 +24,7 @@ for permission in (
     'android.permission.FOREGROUND_SERVICE',
     'android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK',
     'android.permission.NEARBY_WIFI_DEVICES',
+    'android.permission.ACCESS_LOCAL_NETWORK',
 ):
     if permission not in text:
         text = text.replace(
