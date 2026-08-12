@@ -3,7 +3,6 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 import 'package:streambox/models/channel.dart';
 import 'package:streambox/services/preferences_service.dart';
 
