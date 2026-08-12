@@ -6,6 +6,7 @@ import '../services/epg_service.dart';
 import '../services/playlist_service.dart';
 import '../services/preferences_service.dart';
 import '../services/xtream_service.dart';
+import 'dlna_test_screen.dart';
 import 'player_screen.dart';
 
 enum LibraryView { channels, favorites, history }
@@ -120,9 +121,14 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _open(Channel channel) async { await _prefs.addHistory(channel.id); _history = await _prefs.history(); if (mounted) { setState(() {}); await Navigator.push(context, MaterialPageRoute<void>(builder: (_) => PlayerScreen(channel: channel, channels: _channels))); } }
   Future<void> _favorite(Channel channel) async { final value = !_favorites.contains(channel.id); await _prefs.setFavorite(channel.id, value); _favorites = await _prefs.favorites(); if (mounted) setState(() {}); }
 
+  Future<void> _openDlnaTest() => Navigator.push<void>(
+        context,
+        MaterialPageRoute<void>(builder: (_) => const DlnaTestScreen()),
+      );
+
   @override void dispose() { _playlist.dispose(); _xtream.dispose(); _search.dispose(); super.dispose(); }
   @override Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('StreamBox'), actions: [IconButton(onPressed: _channels.isEmpty ? null : _importEpg, tooltip: 'Importar EPG', icon: const Icon(Icons.calendar_month)), IconButton(onPressed: _accessDialog, tooltip: 'Adicionar acesso', icon: const Icon(Icons.add_link)), PopupMenuButton<String>(onSelected: (value) { if (value == 'licenses') showLicensePage(context: context, applicationName: 'StreamBox', applicationVersion: '0.4.0', applicationLegalese: 'Player independente. Nenhum canal ou conteúdo é fornecido.'); if (value == 'premium') showDialog<void>(context: context, builder: (context) => AlertDialog(title: const Text('StreamBox Premium'), content: const Text('A compra será ativada pelo Google Play Billing após o cadastro dos produtos na Play Console. Nenhum pagamento externo será usado no aplicativo.'), actions: [FilledButton(onPressed: () => Navigator.pop(context), child: const Text('Entendi'))])); }, itemBuilder: (_) => const [PopupMenuItem(value: 'premium', child: ListTile(leading: Icon(Icons.workspace_premium), title: Text('Premium'))), PopupMenuItem(value: 'licenses', child: ListTile(leading: Icon(Icons.description_outlined), title: Text('Licenças')))] )]),
+    appBar: AppBar(title: const Text('StreamBox'), actions: [IconButton(onPressed: _channels.isEmpty ? null : _importEpg, tooltip: 'Importar EPG', icon: const Icon(Icons.calendar_month)), IconButton(onPressed: _accessDialog, tooltip: 'Adicionar acesso', icon: const Icon(Icons.add_link)), PopupMenuButton<String>(onSelected: (value) { if (value == 'dlna_test') _openDlnaTest(); if (value == 'licenses') showLicensePage(context: context, applicationName: 'StreamBox', applicationVersion: '0.7.2', applicationLegalese: 'Player independente. Nenhum canal ou conteúdo é fornecido.'); if (value == 'premium') showDialog<void>(context: context, builder: (context) => AlertDialog(title: const Text('StreamBox Premium'), content: const Text('A compra será ativada pelo Google Play Billing após o cadastro dos produtos na Play Console. Nenhum pagamento externo será usado no aplicativo.'), actions: [FilledButton(onPressed: () => Navigator.pop(context), child: const Text('Entendi'))])); }, itemBuilder: (_) => const [PopupMenuItem(value: 'dlna_test', child: ListTile(leading: Icon(Icons.tv), title: Text('Teste DLNA'))), PopupMenuItem(value: 'premium', child: ListTile(leading: Icon(Icons.workspace_premium), title: Text('Premium'))), PopupMenuItem(value: 'licenses', child: ListTile(leading: Icon(Icons.description_outlined), title: Text('Licenças')))] )]),
     bottomNavigationBar: NavigationBar(selectedIndex: _view.index, onDestinationSelected: (i) => setState(() { _view = LibraryView.values[i]; _group = null; }), destinations: const [NavigationDestination(icon: Icon(Icons.live_tv_outlined), selectedIcon: Icon(Icons.live_tv), label: 'Canais'), NavigationDestination(icon: Icon(Icons.star_outline), selectedIcon: Icon(Icons.star), label: 'Favoritos'), NavigationDestination(icon: Icon(Icons.history), label: 'Histórico')]),
     body: SafeArea(child: Column(children: [
       Padding(padding: const EdgeInsets.fromLTRB(16, 12, 16, 6), child: SearchBar(controller: _search, hintText: 'Buscar canal ou categoria', leading: const Icon(Icons.search), trailing: [if (_search.text.isNotEmpty) IconButton(onPressed: () { _search.clear(); setState(() {}); }, icon: const Icon(Icons.close))], onChanged: (_) => setState(() {}))),
