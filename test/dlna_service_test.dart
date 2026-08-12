@@ -25,6 +25,8 @@ void main() {
       if (actions.length == 1) {
         expect(request.body, contains('SetAVTransportURI'));
         expect(request.body, contains('https://example.com/live.m3u8'));
+        expect(request.body, contains('&lt;DIDL-Lite'));
+        expect(request.body, contains('object.item.videoItem.movie'));
       }
       return http.Response('', 200);
     });
@@ -36,6 +38,62 @@ void main() {
       '"urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI"',
       '"urn:schemas-upnp-org:service:AVTransport:1#Play"',
     ]);
+    await service.dispose();
+  });
+
+  test('uses AVTransport service type and controlURL advertised by Samsung', () async {
+    final service = DlnaService();
+    const description = '''
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+  <URLBase>http://192.168.1.55:9197/base/</URLBase>
+  <device>
+    <friendlyName>Samsung AU7700</friendlyName>
+    <manufacturer>Samsung Electronics</manufacturer>
+    <modelName>UA50AU7700</modelName>
+    <UDN>uuid:samsung-au7700</UDN>
+    <serviceList>
+      <service>
+        <serviceType>urn:schemas-upnp-org:service:AVTransport:2</serviceType>
+        <serviceId>urn:upnp-org:serviceId:AVTransport</serviceId>
+        <controlURL>/upnp/control/AVTransport2</controlURL>
+      </service>
+      <service>
+        <serviceType>urn:schemas-upnp-org:service:ConnectionManager:1</serviceType>
+        <controlURL>connection/control</controlURL>
+      </service>
+    </serviceList>
+  </device>
+</root>
+''';
+
+    final parsed = service.parseDeviceDescription(
+      Uri.parse('http://192.168.1.55:9197/description.xml'),
+      description,
+    );
+
+    expect(parsed, isNotNull);
+    expect(parsed!.brand, TvBrand.samsung);
+    expect(parsed.avTransportServiceType,
+        'urn:schemas-upnp-org:service:AVTransport:2');
+    expect(parsed.avTransportControlUrl.toString(),
+        'http://192.168.1.55:9197/upnp/control/AVTransport2');
+    expect(parsed.connectionManagerControlUrl.toString(),
+        'http://192.168.1.55:9197/base/connection/control');
+    await service.dispose();
+  });
+
+  test('reports authorization error separately from connection failure', () async {
+    final client = MockClient((_) async => http.Response('<error>denied</error>', 403));
+    final service = DlnaService(client: client);
+
+    await expectLater(
+      service.connect(device, channel),
+      throwsA(
+        isA<DlnaException>()
+            .having((error) => error.kind, 'kind', DlnaErrorKind.authorization)
+            .having((error) => error.message, 'message', contains('autorização')),
+      ),
+    );
     await service.dispose();
   });
 

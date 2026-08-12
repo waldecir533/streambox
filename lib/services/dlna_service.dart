@@ -23,8 +23,13 @@ class DlnaDevice {
     required this.name,
     required this.location,
     required this.avTransportControlUrl,
+    this.avTransportServiceType = 'urn:schemas-upnp-org:service:AVTransport:1',
     this.connectionManagerControlUrl,
+    this.connectionManagerServiceType =
+        'urn:schemas-upnp-org:service:ConnectionManager:1',
     this.renderingControlUrl,
+    this.renderingControlServiceType =
+        'urn:schemas-upnp-org:service:RenderingControl:1',
     this.model,
     this.manufacturer,
     this.brand = TvBrand.other,
@@ -37,13 +42,19 @@ class DlnaDevice {
   final TvBrand brand;
   final Uri location;
   final Uri avTransportControlUrl;
+  final String avTransportServiceType;
   final Uri? connectionManagerControlUrl;
+  final String connectionManagerServiceType;
   final Uri? renderingControlUrl;
+  final String renderingControlServiceType;
 }
 
+enum DlnaErrorKind { authorization, connection, incompatibleFormat }
+
 class DlnaException implements Exception {
-  const DlnaException(this.message);
+  const DlnaException(this.message, {this.kind = DlnaErrorKind.connection});
   final String message;
+  final DlnaErrorKind kind;
   @override
   String toString() => message;
 }
@@ -157,38 +168,100 @@ class DlnaService {
 
   Future<DlnaDevice?> _loadDescription(Uri location) async {
     final response = await _client.get(location).timeout(connectionTimeout);
-    if (response.statusCode < 200 || response.statusCode >= 300) return null;
-    final document = XmlDocument.parse(response.body);
-    final deviceNode = document.findAllElements('device').firstOrNull;
+    developer.log(
+      'Device Description ${location.host}:${location.port}${location.path} '
+      '-> HTTP ${response.statusCode}',
+      name: 'StreamBox.DLNA.HTTP',
+    );
+    if (response.statusCode == 401 || response.statusCode == 403) {
+      throw const DlnaException(
+        'A TV recusou a autorização da conexão.',
+        kind: DlnaErrorKind.authorization,
+      );
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw const DlnaException('Não foi possível acessar a descrição da TV.');
+    }
+    return parseDeviceDescription(location, response.body);
+  }
+
+  DlnaDevice? parseDeviceDescription(Uri location, String xml) {
+    final document = XmlDocument.parse(xml);
+    final deviceNode = document.descendants
+        .whereType<XmlElement>()
+        .where((element) => element.name.local == 'device')
+        .firstOrNull;
     if (deviceNode == null) return null;
-    final services = deviceNode.findAllElements('service');
+    final urlBaseText = document.descendants
+        .whereType<XmlElement>()
+        .where((element) => element.name.local == 'URLBase')
+        .firstOrNull
+        ?.innerText
+        .trim();
+    final parsedBaseUrl = urlBaseText == null || urlBaseText.isEmpty
+        ? null
+        : Uri.tryParse(urlBaseText);
+    final baseUrl = parsedBaseUrl ?? location;
+    final services = deviceNode.descendants
+        .whereType<XmlElement>()
+        .where((element) => element.name.local == 'service');
     Uri? avTransport;
     Uri? rendering;
     Uri? connectionManager;
+    String? avTransportType;
+    String? renderingType;
+    String? connectionManagerType;
     for (final service in services) {
-      final type = service.getElement('serviceType')?.innerText ?? '';
-      final control = service.getElement('controlURL')?.innerText.trim();
+      final type = _childText(service, 'serviceType') ?? '';
+      final control = _childText(service, 'controlURL');
       if (control == null || control.isEmpty) continue;
-      final resolved = location.resolve(control);
-      if (type.contains(':AVTransport:')) avTransport = resolved;
-      if (type.contains(':RenderingControl:')) rendering = resolved;
-      if (type.contains(':ConnectionManager:')) connectionManager = resolved;
+      final resolved = baseUrl.resolve(control);
+      if (type.contains(':AVTransport:') &&
+          _serviceVersion(type) >= _serviceVersion(avTransportType)) {
+        avTransport = resolved;
+        avTransportType = type.trim();
+      }
+      if (type.contains(':RenderingControl:') &&
+          _serviceVersion(type) >= _serviceVersion(renderingType)) {
+        rendering = resolved;
+        renderingType = type.trim();
+      }
+      if (type.contains(':ConnectionManager:') &&
+          _serviceVersion(type) >= _serviceVersion(connectionManagerType)) {
+        connectionManager = resolved;
+        connectionManagerType = type.trim();
+      }
     }
     if (avTransport == null) return null;
-    final manufacturer = deviceNode.getElement('manufacturer')?.innerText.trim();
-    final model = deviceNode.getElement('modelName')?.innerText.trim();
+    final manufacturer = _childText(deviceNode, 'manufacturer');
+    final model = _childText(deviceNode, 'modelName');
     return DlnaDevice(
-      id: deviceNode.getElement('UDN')?.innerText.trim() ?? location.toString(),
-      name: deviceNode.getElement('friendlyName')?.innerText.trim() ?? 'Smart TV',
+      id: _childText(deviceNode, 'UDN') ?? location.toString(),
+      name: _childText(deviceNode, 'friendlyName') ?? 'Smart TV',
       model: model,
       manufacturer: manufacturer,
       brand: _detectBrand('$manufacturer $model'),
       location: location,
       avTransportControlUrl: avTransport,
+      avTransportServiceType: avTransportType!,
       renderingControlUrl: rendering,
+      renderingControlServiceType: renderingType ??
+          'urn:schemas-upnp-org:service:RenderingControl:1',
       connectionManagerControlUrl: connectionManager,
+      connectionManagerServiceType: connectionManagerType ??
+          'urn:schemas-upnp-org:service:ConnectionManager:1',
     );
   }
+
+  String? _childText(XmlElement parent, String localName) => parent.children
+      .whereType<XmlElement>()
+      .where((element) => element.name.local == localName)
+      .firstOrNull
+      ?.innerText
+      .trim();
+
+  int _serviceVersion(String? serviceType) =>
+      int.tryParse(serviceType?.split(':').last ?? '') ?? -1;
 
   TvBrand _detectBrand(String description) {
     final value = description.toLowerCase();
@@ -219,6 +292,14 @@ class DlnaService {
         stackTrace: stackTrace,
       );
       if (error is DlnaException) rethrow;
+      if (error is TvStreamException) {
+        throw DlnaException(
+          error.message,
+          kind: error.authorization
+              ? DlnaErrorKind.authorization
+              : DlnaErrorKind.connection,
+        );
+      }
       throw const DlnaException('Não foi possível conectar à TV');
     }
   }
@@ -230,7 +311,7 @@ class DlnaService {
     final metadata = _didlMetadata(channel, remoteUrl);
     await _soap(
       device.avTransportControlUrl,
-      'urn:schemas-upnp-org:service:AVTransport:1',
+      device.avTransportServiceType,
       'SetAVTransportURI',
       {
         'InstanceID': '0',
@@ -243,21 +324,21 @@ class DlnaService {
 
   Future<void> play(DlnaDevice device) => _soap(
         device.avTransportControlUrl,
-        'urn:schemas-upnp-org:service:AVTransport:1',
+        device.avTransportServiceType,
         'Play',
         {'InstanceID': '0', 'Speed': '1'},
       ).then((_) {});
 
   Future<void> pause(DlnaDevice device) => _soap(
         device.avTransportControlUrl,
-        'urn:schemas-upnp-org:service:AVTransport:1',
+        device.avTransportServiceType,
         'Pause',
         {'InstanceID': '0'},
       ).then((_) {});
 
   Future<void> stop(DlnaDevice device) => _soap(
         device.avTransportControlUrl,
-        'urn:schemas-upnp-org:service:AVTransport:1',
+        device.avTransportServiceType,
         'Stop',
         {'InstanceID': '0'},
       ).then((_) {});
@@ -269,7 +350,7 @@ class DlnaService {
     }
     await _soap(
       url,
-      'urn:schemas-upnp-org:service:RenderingControl:1',
+      device.renderingControlServiceType,
       'SetVolume',
       {
         'InstanceID': '0',
@@ -282,7 +363,7 @@ class DlnaService {
   Future<DlnaPosition> position(DlnaDevice device) async {
     final response = await _soap(
       device.avTransportControlUrl,
-      'urn:schemas-upnp-org:service:AVTransport:1',
+      device.avTransportServiceType,
       'GetPositionInfo',
       {'InstanceID': '0'},
     );
@@ -295,7 +376,7 @@ class DlnaService {
 
   Future<void> seek(DlnaDevice device, Duration position) => _soap(
         device.avTransportControlUrl,
-        'urn:schemas-upnp-org:service:AVTransport:1',
+        device.avTransportServiceType,
         'Seek',
         {
           'InstanceID': '0',
@@ -309,14 +390,17 @@ class DlnaService {
     if (url == null) return;
     final response = await _soap(
       url,
-      'urn:schemas-upnp-org:service:ConnectionManager:1',
+      device.connectionManagerServiceType,
       'GetProtocolInfo',
       const {},
     );
     final document = XmlDocument.parse(response.body);
     final sink = document.findAllElements('Sink').firstOrNull?.innerText.toLowerCase() ?? '';
     if (sink.isNotEmpty && !sink.contains(mimeType.toLowerCase()) && !sink.contains('*:*')) {
-      throw DlnaException(_incompatibleMessage(mimeType));
+      throw DlnaException(
+        _incompatibleMessage(mimeType),
+        kind: DlnaErrorKind.incompatibleFormat,
+      );
     }
   }
 
@@ -329,6 +413,7 @@ class DlnaService {
     if (path.endsWith('.ts') || path.endsWith('.mpegts')) return 'video/mp2t';
     throw const DlnaException(
       'Este formato não é compatível com transmissão para TV. A reprodução continua no celular.',
+      kind: DlnaErrorKind.incompatibleFormat,
     );
   }
 
@@ -386,17 +471,22 @@ class DlnaService {
         },
         body: body.toString(),
       ).timeout(connectionTimeout);
+      developer.log(
+        'SOAP $action ${url.host}:${url.port}${url.path} -> HTTP ${response.statusCode}; '
+        'resposta=${_safeSoapLog(response.body)}',
+        name: 'StreamBox.DLNA.SOAP',
+      );
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw const DlnaException(
-          'Não foi possível conectar à TV',
-        );
+        throw _soapFailure(response);
       }
       return response;
     } on TimeoutException {
+      developer.log('SOAP $action excedeu o timeout', name: 'StreamBox.DLNA.SOAP');
       throw const DlnaException(
         'Não foi possível conectar à TV',
       );
     } on SocketException {
+      developer.log('SOAP $action falhou na conexão', name: 'StreamBox.DLNA.SOAP');
       throw const DlnaException(
         'Não foi possível conectar à TV',
       );
@@ -410,9 +500,44 @@ class DlnaService {
         'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">'
         '<item id="0" parentID="0" restricted="1">'
         '<dc:title>${_xmlEscape(channel.name)}</dc:title>'
-        '<upnp:class>object.item.videoItem</upnp:class>'
-        '<res protocolInfo="http-get:*:$protocol:*">${_xmlEscape(remoteUrl.toString())}</res>'
+        '<upnp:class>object.item.videoItem.movie</upnp:class>'
+        '<res protocolInfo="http-get:*:$protocol:DLNA.ORG_OP=01;DLNA.ORG_CI=0">'
+        '${_xmlEscape(remoteUrl.toString())}</res>'
         '</item></DIDL-Lite>';
+  }
+
+  DlnaException _soapFailure(http.Response response) {
+    if (response.statusCode == 401 || response.statusCode == 403) {
+      return const DlnaException(
+        'A TV recusou a autorização da conexão.',
+        kind: DlnaErrorKind.authorization,
+      );
+    }
+    final body = response.body.toLowerCase();
+    if (response.statusCode == 415 ||
+        body.contains('<errorcode>714</errorcode>') ||
+        body.contains('<errorcode>716</errorcode>') ||
+        body.contains('illegal mime-type') ||
+        body.contains('unsupported')) {
+      return const DlnaException(
+        'A TV não aceita o formato deste canal. A reprodução continua no celular.',
+        kind: DlnaErrorKind.incompatibleFormat,
+      );
+    }
+    return const DlnaException(
+      'Não foi possível estabelecer conexão com a TV.',
+      kind: DlnaErrorKind.connection,
+    );
+  }
+
+  String _safeSoapLog(String body) {
+    final withoutUrls = body.replaceAll(
+      RegExp(r'https?://[^<\s]+', caseSensitive: false),
+      '<url-oculta>',
+    );
+    return withoutUrls.length <= 600
+        ? withoutUrls
+        : '${withoutUrls.substring(0, 600)}…';
   }
 
   String _xmlEscape(String value) => value

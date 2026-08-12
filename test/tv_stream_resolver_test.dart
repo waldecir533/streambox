@@ -35,4 +35,22 @@ void main() {
     expect(resolved.toString(), isNot(contains('channel-secret')));
     await resolver.dispose();
   });
+
+  test('requires secure backend for Authorization header', () async {
+    final resolver = TvStreamResolver();
+    const channel = Channel(
+      name: 'Protegido',
+      url: 'https://origin.example.com/live.m3u8',
+      headers: {'Authorization': 'Bearer channel-secret'},
+    );
+
+    await expectLater(
+      resolver.resolve(channel),
+      throwsA(
+        isA<TvStreamException>()
+            .having((error) => error.authorization, 'authorization', isTrue),
+      ),
+    );
+    await resolver.dispose();
+  });
 }

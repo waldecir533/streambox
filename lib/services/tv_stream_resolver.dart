@@ -8,8 +8,9 @@ import '../models/channel.dart';
 import 'stream_proxy_service.dart';
 
 class TvStreamException implements Exception {
-  const TvStreamException(this.message);
+  const TvStreamException(this.message, {this.authorization = false});
   final String message;
+  final bool authorization;
 }
 
 class TvStreamResolver {
@@ -34,6 +35,14 @@ class TvStreamResolver {
     if (hasAuthenticatedBackend) {
       developer.log('Preparando URL opaca no proxy backend', name: 'StreamBox.Proxy');
       return _resolveWithBackend(channel);
+    }
+    if (channel.headers.keys.any(
+      (key) => key.toLowerCase() == HttpHeaders.authorizationHeader,
+    )) {
+      throw const TvStreamException(
+        'Este canal exige autorização. Configure o proxy seguro para transmitir sem expor credenciais.',
+        authorization: true,
+      );
     }
     developer.log('Usando proxy local com token opaco', name: 'StreamBox.Proxy');
     return _localProxy.urlFor(channel);
@@ -64,7 +73,12 @@ class TvStreamResolver {
           )
           .timeout(const Duration(seconds: 8));
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw const TvStreamException('O serviço seguro de transmissão não respondeu.');
+        throw TvStreamException(
+          response.statusCode == 401 || response.statusCode == 403
+              ? 'O proxy seguro recusou a autorização.'
+              : 'O serviço seguro de transmissão não respondeu.',
+          authorization: response.statusCode == 401 || response.statusCode == 403,
+        );
       }
       final decoded = jsonDecode(response.body);
       final url = decoded is Map ? decoded['url']?.toString() : null;

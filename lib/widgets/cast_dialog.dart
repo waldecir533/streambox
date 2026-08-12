@@ -111,7 +111,7 @@ class _CastDialogState extends State<CastDialog> {
       developer.log('Falha na operação com TV', name: 'StreamBox.Cast', error: error);
       if (mounted) {
         setState(() {
-          _message = 'Não foi possível conectar à TV';
+          _message = error.message;
           _kind = null;
           _dlnaConnected = null;
         });
