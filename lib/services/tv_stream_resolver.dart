@@ -16,20 +16,18 @@ class TvStreamResolver {
   TvStreamResolver({
     http.Client? client,
     StreamProxyService? localProxy,
-    String backendUrl = const String.fromEnvironment('STREAMBOX_PROXY_URL'),
-    String backendToken = const String.fromEnvironment('STREAMBOX_PROXY_TOKEN'),
+    this.backendUrl = const String.fromEnvironment('STREAMBOX_PROXY_URL'),
+    this.backendToken = const String.fromEnvironment('STREAMBOX_PROXY_TOKEN'),
   })  : _client = client ?? http.Client(),
-        _localProxy = localProxy ?? StreamProxyService(),
-        _backendUrl = backendUrl,
-        _backendToken = backendToken;
+        _localProxy = localProxy ?? StreamProxyService();
 
   final http.Client _client;
   final StreamProxyService _localProxy;
-  final String _backendUrl;
-  final String _backendToken;
+  final String backendUrl;
+  final String backendToken;
 
   bool get hasAuthenticatedBackend =>
-      _backendUrl.startsWith('https://') && _backendToken.isNotEmpty;
+      backendUrl.startsWith('https://') && backendToken.isNotEmpty;
 
   Future<Uri> resolve(Channel channel) async {
     if (!_requiresProxy(channel)) return Uri.parse(channel.url);
@@ -53,9 +51,9 @@ class TvStreamResolver {
     try {
       final response = await _client
           .post(
-            Uri.parse(_backendUrl),
+            Uri.parse(backendUrl),
             headers: {
-              HttpHeaders.authorizationHeader: 'Bearer $_backendToken',
+              HttpHeaders.authorizationHeader: 'Bearer $backendToken',
               HttpHeaders.contentTypeHeader: 'application/json',
             },
             body: jsonEncode({

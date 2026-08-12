@@ -179,10 +179,12 @@ class _CastDialogState extends State<CastDialog> {
           });
         } else if (_dlnaConnected != null) {
           final info = await _dlna.position(_dlnaConnected!);
-          if (mounted) setState(() {
-            _position = info.position;
-            _duration = info.duration;
-          });
+          if (mounted) {
+            setState(() {
+              _position = info.position;
+              _duration = info.duration;
+            });
+          }
         }
       } catch (error) {
         developer.log('Falha ao consultar posição', name: 'StreamBox.Cast', error: error);
