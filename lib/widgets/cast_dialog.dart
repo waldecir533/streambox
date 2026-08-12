@@ -33,8 +33,12 @@ class _CastDialogState extends State<CastDialog> {
   bool _busy = false;
   bool _discovering = true;
   bool _playing = true;
+  bool _confirmed = false;
   double _volume = .5;
   String? _message;
+  Timer? _stateTimer;
+  String? _diagnosisResult;
+  bool _diagnosing = false;
 
   @override
   void initState() {
@@ -78,8 +82,75 @@ class _CastDialogState extends State<CastDialog> {
       await _dlna.connect(device, _channel);
       _dlnaConnected = device;
       _kind = _ConnectionKind.dlna;
-      _message = 'Transmitindo para ${device.name}.';
+      _confirmed = true;
+      _message = 'Transmitindo para ${device.name}. Reprodução confirmada pela TV.';
+      _startStatePolling();
     });
+  }
+
+  /// Diagnóstico de rede: testa se a URL que será entregue à TV é
+  /// realmente alcançável pelo próprio celular (mesmo caminho da TV).
+  Future<void> _diagnose() async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _diagnosing = true;
+      _diagnosisResult = null;
+    });
+    try {
+      final proxy = _dlna.proxy;
+      final announced = await proxy.urlFor(_channel);
+      final reachable = await proxy.testUrl(announced);
+      if (mounted) {
+        setState(() {
+          _diagnosing = false;
+          _diagnosisResult = reachable
+              ? '✓ Servidor OK (${proxy.advertisedHost}:${proxy.port}) — a URL '
+                  '${announced.host}:${announced.port} é alcançável. '
+                  'Se a TV ainda exibir erro, veja se ela está na MESMA rede Wi-Fi '
+                  'do celular (mesmo roteador) e repita a transmissão.'
+              : '✗ URL INALCANÇÁVEL — http://${proxy.advertisedHost}:${proxy.port} '
+                  'não respondeu. Causa provável: celular e TV em redes '
+                  'diferentes (dados móveis/VPN/Wi-Fi Direct), roteador com '
+                  'isolamento de AP ou firewall Android bloqueando o app. '
+                  'Desative VPN/VPN privada do Android e repita.';
+        });
+      }
+    } on DlnaProxyException catch (error) {
+      if (mounted) {
+        setState(() {
+          _diagnosing = false;
+          _diagnosisResult = '✗ ${error.message}';
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _diagnosing = false);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// Consulta `GetTransportInfo`/`GetPositionInfo` periodicamente para
+  /// detectar quando a TV para de reproduzir (travamento/tela preta) e
+  /// alertar o usuário.
+  void _startStatePolling() {
+    _stateTimer?.cancel();
+    _stateTimer = Timer.periodic(const Duration(seconds: 5), (_) => _checkDlnaState());
+  }
+
+  Future<void> _checkDlnaState() async {
+    final device = _dlnaConnected;
+    if (_kind != _ConnectionKind.dlna || device == null) return;
+    final state = await _dlna.playState(device);
+    if (state == null) return;
+    final wasPlaying = _playing;
+    final isPlaying = state.isPlaying;
+    if (wasPlaying && !isPlaying && mounted) {
+      setState(() {
+        _playing = false;
+        _message = 'A TV interrompeu a reprodução. Toque em reproduzir para retomar.';
+      });
+    }
   }
 
   Future<void> _runRemoteAction(Future<void> Function() action) async {
@@ -109,12 +180,17 @@ class _CastDialogState extends State<CastDialog> {
     await _runRemoteAction(() async {
       if (_kind == _ConnectionKind.googleCast) {
         _playing ? await CastService.pause() : await CastService.play();
+        _playing = !_playing;
       } else if (_dlnaConnected != null) {
-        _playing
-            ? await _dlna.pause(_dlnaConnected!)
-            : await _dlna.play(_dlnaConnected!);
+        if (_playing) {
+          await _dlna.pause(_dlnaConnected!);
+          _playing = false;
+        } else {
+          await _dlna.setChannel(_dlnaConnected!, _channel);
+          _playing = true;
+          _confirmed = true;
+        }
       }
-      _playing = !_playing;
     });
   }
 
@@ -158,6 +234,7 @@ class _CastDialogState extends State<CastDialog> {
 
   @override
   void dispose() {
+    _stateTimer?.cancel();
     _dlnaSubscription?.cancel();
     _dlna.dispose();
     super.dispose();
@@ -195,6 +272,29 @@ class _CastDialogState extends State<CastDialog> {
                   ),
                 ),
               if (_kind != null) _remoteControls(),
+              if (_kind == null || _kind == _ConnectionKind.dlna) _diagnosisPanel(),
+              if (_kind == _ConnectionKind.dlna && _dlnaConnected != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Row(
+                    children: [
+                      Icon(
+                        _playing && _confirmed ? Icons.check_circle : Icons.circle_outlined,
+                        size: 16,
+                        color: _playing && _confirmed ? Colors.green : Theme.of(context).colorScheme.outline,
+                      ),
+                      const SizedBox(width: 6),
+                      Flexible(
+                        child: Text(
+                          _playing && _confirmed
+                              ? 'Reprodução confirmada pela TV (${_dlnaConnected!.name}).'
+                              : 'Aguardando confirmação da TV...',
+                          style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               const Padding(
                 padding: EdgeInsets.only(top: 20, bottom: 8),
                 child: Text('Google Cast / Chromecast', style: TextStyle(fontWeight: FontWeight.bold)),
@@ -251,6 +351,43 @@ class _CastDialogState extends State<CastDialog> {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  /// Painel de diagnóstico DLNA: endereço do servidor local, URL que a TV
+  /// receberá e resultado do teste de acessibilidade.
+  Widget _diagnosisPanel() {
+    return Card(
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Diagnóstico DLNA', style: TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 6),
+            Text(
+              'Servidor local: http://${_dlna.proxy.advertisedHost ?? "…"}:${_dlna.proxy.port ?? "…"}\n'
+              'URL enviada à TV: ${_dlna.lastAnnouncedUrl ?? "(ainda não enviada)"}',
+              style: const TextStyle(fontSize: 12),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _busy ? null : _diagnose,
+                  icon: Icon(_diagnosing ? Icons.hourglass_empty : Icons.hub),
+                  label: Text(_diagnosing ? 'Testando…' : 'Testar URL da TV'),
+                ),
+              ],
+            ),
+            if (_diagnosisResult != null) ...[
+              const SizedBox(height: 8),
+              Text(_diagnosisResult!, style: const TextStyle(fontSize: 12)),
+            ],
+          ],
         ),
       ),
     );

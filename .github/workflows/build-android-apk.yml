@@ -12,7 +12,7 @@ on:
       - master
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: android-${{ github.ref }}
@@ -63,11 +63,17 @@ jobs:
       - name: Build release AAB
         run: flutter build appbundle --release
 
+      - name: Rename APK with version
+        run: |
+          VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: //' | cut -d'+' -f1)
+          cp build/app/outputs/flutter-apk/app-release.apk "StreamBox-${VERSION}.apk"
+          echo "APK_NAME=StreamBox-${VERSION}.apk" >> "$GITHUB_ENV"
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: streambox-android-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: StreamBox-${{ env.APK_NAME }}
           if-no-files-found: error
           retention-days: 30
 
@@ -78,3 +84,50 @@ jobs:
           path: build/app/outputs/bundle/release/app-release.aab
           if-no-files-found: error
           retention-days: 30
+
+  # Publica o APK em um Release permanente do GitHub, para que o link de
+  # download nunca expire (artifacts de Actions expiram em 30 dias).
+  release:
+    needs: build-apk
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Read version from pubspec
+        run: |
+          echo "VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: //' | cut -d'+' -f1)" >> "$GITHUB_ENV"
+          echo "BUILD=$(grep '^version:' pubspec.yaml | sed 's/version: .*+//' )" >> "$GITHUB_ENV"
+
+      - name: Download APK from build job
+        uses: actions/download-artifact@v4
+        with:
+          name: streambox-android-apk
+          path: release-artifacts/
+
+      - name: Tag "atual-N" sempre aponta para a versão mais recente
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f "atual-${{ env.BUILD }}"
+          git push -f origin "atual-${{ env.BUILD }}"
+
+      - name: Publish GitHub Release with the APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: StreamBox ${{ env.VERSION }}
+          body: |
+            APK de lançamento do StreamBox ${{ env.VERSION }} (build ${{ env.BUILD }}).
+
+            Baixar: **StreamBox-${{ env.VERSION }}.apk**
+
+            Download permanente (não expira):
+            https://github.com/waldecir533/streambox/releases/latest/download/StreamBox-${{ env.VERSION }}.apk
+          files: release-artifacts/*
+          fail_on_unmatched_files: true

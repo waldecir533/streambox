@@ -8,6 +8,8 @@ import 'package:xml/xml.dart';
 import '../models/channel.dart';
 import 'stream_proxy_service.dart';
 
+export 'stream_proxy_service.dart' show DlnaProxyException;
+
 class DlnaDevice {
   const DlnaDevice({
     required this.id,
@@ -24,6 +26,48 @@ class DlnaDevice {
   final Uri location;
   final Uri avTransportControlUrl;
   final Uri? renderingControlUrl;
+}
+
+/// Estado de reprodução da TV obtido via `GetTransportInfo` e
+/// `GetPositionInfo`.
+class DlnaPlayState {
+  const DlnaPlayState({
+    required this.transportState,
+    required this.transportStatus,
+    required this.mediaDuration,
+    required this.mediaPosition,
+  });
+
+  final String transportState;
+  final String transportStatus;
+  final String mediaDuration;
+  final String mediaPosition;
+
+  bool get isPlaying => transportState == 'PLAYING';
+
+  /// A posição avança (RelTime/TrackDuration não está travado em "00:00:00")?
+  /// Algumas TVs (Samsung incluída) entram em PLAYING mesmo quando a mídia
+  /// é rejeitada; a posição avançando é a prova real da reprodução.
+  bool get positionAdvancing {
+    final rel = _parseRelTime(mediaPosition);
+    final duration = _parseRelTime(mediaDuration);
+    if (rel == null || duration == null || duration.inSeconds <= 0) {
+      return true; // sem duração conhecida (ao vivo/HLS) — não há o que checar
+    }
+    // Considera "avançando" quando a posição já saiu do início ou chegou a
+    // mais de 1% do total; posição travada em 0 com duração > 0 = problema.
+    return rel.inSeconds > 0 || duration.inSeconds < 60;
+  }
+
+  static Duration? _parseRelTime(String raw) {
+    final parts = raw.trim().split(':');
+    if (parts.length != 3) return null;
+    final h = int.tryParse(parts[0]);
+    final m = int.tryParse(parts[1]);
+    final s = int.tryParse(parts[2]);
+    if (h == null || m == null || s == null) return null;
+    return Duration(hours: h, minutes: m, seconds: s);
+  }
 }
 
 class DlnaException implements Exception {
@@ -144,10 +188,37 @@ class DlnaService {
     connectedDevice = device;
   }
 
+  /// URLs locais do proxy retransmitem o vídeo para a TV com cabeçalhos
+  /// completos (HEAD, Content-Length, Content-Type e Range/206), sem os
+  /// quais TVs Samsung (ex.: AU7700) aceitam o comando mas não reproduzem.
+  /// URL anunciada à TV na última chamada de `setChannel` (para diagnóstico).
+  Uri? lastAnnouncedUrl;
+
+  /// Servidor local usado (para diagnóstico de rede/IP/porta).
+  StreamProxyService get proxy => _proxy;
+
   Future<void> setChannel(DlnaDevice device, Channel channel) async {
-    final remoteUrl = channel.headers.isEmpty
-        ? Uri.parse(channel.url)
-        : await _proxy.urlFor(channel);
+    // O proxy local sempre é usado: além de retransmitir os cabeçalhos do
+    // canal, ele garante HEAD/Content-Length/Content-Type e Range/206 que
+    // a TV exige.
+    final remoteUrl = await _proxy.urlFor(channel);
+    lastAnnouncedUrl = remoteUrl;
+    // Antes de enviar à TV, verifica se a URL é realmente alcançável —
+    // exatamente o que a TV fará. Se a TV não consegue acessar o servidor
+    // do celular (rede diferente, Wi-Fi Direct, VPN, firewall Android),
+    // o erro é claro em vez de "a TV exibe erro e não toca".
+    final reachable = await _proxy.testUrl(remoteUrl);
+    if (!reachable) {
+      throw DlnaException(
+        'O servidor do celular (http://${_proxy.advertisedHost}:${_proxy.port}) '
+        'não respondeu à própria URL. Possíveis causas: celular conectado em '
+        'outra rede que a TV (VPN, Wi-Fi Direct, dados móveis); app bloqueado '
+        'pelo firewall Android (Configurações → Apps → StreamBox → Permitir '
+        'acesso a dados em segundo plano / desativar “Restringir dados em '
+        'background"); ou TV em rede 2,4/5 GHz isolada pelo roteador '
+        '(desative AP Isolation). Repita a reprodução.',
+      );
+    }
     final metadata = _didlMetadata(channel, remoteUrl);
     await _soap(
       device.avTransportControlUrl,
@@ -160,6 +231,8 @@ class DlnaService {
       },
     );
     await play(device);
+    // Confirma que a TV iniciou a reprodução antes de considerar conectado.
+    await _waitForPlaying(device);
   }
 
   Future<void> play(DlnaDevice device) => _soap(
@@ -168,6 +241,119 @@ class DlnaService {
         'Play',
         {'InstanceID': '0', 'Speed': '1'},
       );
+
+  /// Confirma a reprodução consultando `GetTransportInfo` e
+  /// `GetPositionInfo` da TV. Retorna o estado e a posição atuais, ou
+  /// `null` se a TV não responder às consultas.
+  Future<DlnaPlayState?> playState(DlnaDevice device) async {
+    try {
+      final transport = await _soapQuery(
+        device.avTransportControlUrl,
+        'urn:schemas-upnp-org:service:AVTransport:1',
+        'GetTransportInfo',
+        {'InstanceID': '0'},
+      );
+      final position = await _soapQuery(
+        device.avTransportControlUrl,
+        'urn:schemas-upnp-org:service:AVTransport:1',
+        'GetPositionInfo',
+        {'InstanceID': '0'},
+      );
+      if (transport == null) return null;
+      return DlnaPlayState(
+        transportState: transport['CurrentTransportState'] ?? '',
+        transportStatus: transport['CurrentTransportStatus'] ?? '',
+        mediaDuration: position?['TrackDuration'] ?? '',
+        mediaPosition: position?['RelTime'] ?? position?['AbsTime'] ?? '',
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Aguarda até a TV sair de `STOPPED`/`NO_MEDIA_PRESENT` e entrar em
+  /// `PLAYING`, ou até o tempo esgotar, evitando "tela preta" silenciosa.
+  Future<void> _waitForPlaying(
+    DlnaDevice device, {
+    Duration timeout = const Duration(seconds: 25),
+    Duration poll = const Duration(milliseconds: 800),
+  }) async {
+    final started = DateTime.now();
+    while (DateTime.now().difference(started) < timeout) {
+      await Future<void>.delayed(poll);
+      final state = await playState(device);
+      if (state == null) {
+        throw const DlnaException(
+          'A TV não respondeu à consulta de estado. Verifique a conexão.',
+        );
+      }
+      if (state.transportState == 'PLAYING') {
+        // PLAYING sozinho não basta para Samsung: confirma que a posição
+        // também está avançando (se travar em 00:00:00, a TV rejeitou a
+        // mídia e vai exibir erro em instantes).
+        final waited = DateTime.now().difference(started);
+        if (!state.positionAdvancing && waited > const Duration(seconds: 6)) {
+          await play(device);
+          continue;
+        }
+        return;
+      }
+      if (state.transportState == 'STOPPED' ||
+          state.transportState == 'NO_MEDIA_PRESENT') {
+        await play(device);
+        continue;
+      }
+      if (state.transportState == 'TRANSITIONING') continue;
+    }
+    throw const DlnaException(
+      'A TV não iniciou a reprodução a tempo. O formato pode não ser compatível.',
+    );
+  }
+
+  Future<Map<String, String>?> _soapQuery(
+    Uri url,
+    String serviceType,
+    String action,
+    Map<String, String> arguments,
+  ) {
+    final body = StringBuffer(
+      '<?xml version="1.0" encoding="utf-8"?>'
+      '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
+      's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
+      '<s:Body><u:$action xmlns:u="$serviceType">',
+    );
+    arguments.forEach((key, value) {
+      body.write('<$key>${_xmlEscape(value)}</$key>');
+    });
+    body.write('</u:$action></s:Body></s:Envelope>');
+    final xml = body.toString();
+    return _client
+        .post(
+          url,
+          headers: {
+            HttpHeaders.contentTypeHeader: 'text/xml; charset="utf-8"',
+            'SOAPACTION': '"$serviceType#$action"',
+          },
+          body: xml,
+        )
+        .timeout(const Duration(seconds: 8))
+        .then((response) {
+          if (response.statusCode < 200 || response.statusCode >= 300) {
+            return null;
+          }
+          final parsed = <String, String>{};
+          final document = XmlDocument.parse(response.body);
+          for (final element in document.findAllElements('*')) {
+            if (element.name.namespaceUri == 'http://schemas.xmlsoap.org/soap/envelope/') {
+              continue;
+            }
+            parsed[element.name.local] = element.innerText;
+          }
+          return parsed;
+        })
+        .timeout(const Duration(seconds: 10), onTimeout: () => null)
+        .catchError((_) => null);
+  }
 
   Future<void> pause(DlnaDevice device) => _soap(
         device.avTransportControlUrl,
@@ -252,18 +438,36 @@ class DlnaService {
   }
 
   String _didlMetadata(Channel channel, Uri remoteUrl) {
-    final protocol = channel.url.toLowerCase().contains('.m3u8')
-        ? 'application/vnd.apple.mpegurl'
-        : 'video/mp4';
+    // O `protocolInfo` acompanha o Content-Type que o proxy realmente
+    // serve (mp4 → video/mp4; m3u8 → mpegurl etc.). TVs Samsung e LG são
+    // exigentes: protocolInfo diferente do Content-Type real causa
+    // recusa da mídia. Flags: OP=01 (play), CI=0 (sem conversão), e os
+    // flags padrão de streaming que a Samsung espera.
+    final protocol = _protocolFor(channel.url);
     return '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
         'xmlns:dc="http://purl.org/dc/elements/1.1/" '
         'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">'
-        '<item id="0" parentID="0" restricted="1">'
+        '<item id="0" parentID="-1" restricted="1">'
         '<dc:title>${_xmlEscape(channel.name)}</dc:title>'
-        '<upnp:class>object.item.videoItem</upnp:class>'
-        '<res protocolInfo="http-get:*:$protocol:*">${_xmlEscape(remoteUrl.toString())}</res>'
+        '<dc:date>1970-01-01T00:00:00</dc:date>'
+        '<upnp:class>object.item.videoItem.movie</upnp:class>'
+        '<res protocolInfo="http-get:*:$protocol:DLNA.ORG_PN=_;DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000">${_xmlEscape(remoteUrl.toString())}</res>'
         '</item></DIDL-Lite>';
   }
+
+  String _protocolFor(String url) {
+    final lower = url.toLowerCase();
+    if (lower.contains('.m3u8') || lower.contains('mpegurl')) {
+      return 'application/vnd.apple.mpegurl';
+    }
+    if (lower.contains('.ts') && lower.contains('.m3u')) {
+      return 'video/mp2t';
+    }
+    if (lower.contains('.mkv')) return 'video/x-matroska';
+    if (lower.contains('.webm')) return 'video/webm';
+    return 'video/mp4';
+  }
+
 
   String _xmlEscape(String value) => value
       .replaceAll('&', '&amp;')
