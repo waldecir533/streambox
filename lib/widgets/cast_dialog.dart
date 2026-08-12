@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:developer' as developer;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_chrome_cast/flutter_chrome_cast.dart';
@@ -14,10 +15,12 @@ class CastDialog extends StatefulWidget {
     super.key,
     required this.channel,
     this.channels = const [],
+    this.onConnectionFailed,
   });
 
   final Channel channel;
   final List<Channel> channels;
+  final VoidCallback? onConnectionFailed;
 
   @override
   State<CastDialog> createState() => _CastDialogState();
@@ -35,6 +38,10 @@ class _CastDialogState extends State<CastDialog> {
   bool _playing = true;
   double _volume = .5;
   String? _message;
+  int _operationGeneration = 0;
+  Timer? _positionTimer;
+  Duration _position = Duration.zero;
+  Duration _duration = Duration.zero;
 
   @override
   void initState() {
@@ -47,6 +54,7 @@ class _CastDialogState extends State<CastDialog> {
   }
 
   Future<void> _discover() async {
+    if (!mounted || _busy) return;
     setState(() {
       _discovering = true;
       _message = null;
@@ -61,7 +69,6 @@ class _CastDialogState extends State<CastDialog> {
         setState(() => _message = 'Não foi possível procurar TVs nesta rede.');
       }
     }
-    await Future<void>.delayed(const Duration(seconds: 5));
     if (mounted) setState(() => _discovering = false);
   }
 
@@ -70,6 +77,7 @@ class _CastDialogState extends State<CastDialog> {
       await CastService.cast(_channel, device);
       _kind = _ConnectionKind.googleCast;
       _message = 'Transmitindo para ${device.friendlyName}.';
+      _startPositionPolling();
     });
   }
 
@@ -79,30 +87,71 @@ class _CastDialogState extends State<CastDialog> {
       _dlnaConnected = device;
       _kind = _ConnectionKind.dlna;
       _message = 'Transmitindo para ${device.name}.';
+      _startPositionPolling();
     });
   }
 
   Future<void> _runRemoteAction(Future<void> Function() action) async {
     if (_busy) return;
+    final generation = ++_operationGeneration;
     setState(() {
       _busy = true;
       _message = null;
     });
     try {
       await action();
+      if (generation != _operationGeneration) {
+        if (_kind == _ConnectionKind.googleCast) await CastService.disconnect();
+        if (_kind == _ConnectionKind.dlna) await _dlna.disconnect();
+        _kind = null;
+        _dlnaConnected = null;
+        return;
+      }
     } on DlnaException catch (error) {
-      if (mounted) setState(() => _message = error.message);
-    } catch (_) {
+      developer.log('Falha na operação com TV', name: 'StreamBox.Cast', error: error);
       if (mounted) {
         setState(() {
-          _message = 'A TV não aceitou este canal. A reprodução continua no celular.';
+          _message = error.message;
           _kind = null;
           _dlnaConnected = null;
         });
       }
+      widget.onConnectionFailed?.call();
+    } catch (error, stackTrace) {
+      developer.log(
+        'Falha inesperada na transmissão',
+        name: 'StreamBox.Cast',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      if (mounted) {
+        setState(() {
+          _message = 'Não foi possível conectar à TV';
+          _kind = null;
+          _dlnaConnected = null;
+        });
+      }
+      widget.onConnectionFailed?.call();
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted && generation == _operationGeneration) {
+        setState(() => _busy = false);
+      }
     }
+  }
+
+  Future<void> _cancelOperation() async {
+    _operationGeneration++;
+    await _dlna.stopDiscovery();
+    if (mounted) {
+      setState(() {
+        _busy = false;
+        _discovering = false;
+        _message = 'Conexão cancelada.';
+        _kind = null;
+        _dlnaConnected = null;
+      });
+    }
+    widget.onConnectionFailed?.call();
   }
 
   Future<void> _togglePlayback() async {
@@ -115,6 +164,53 @@ class _CastDialogState extends State<CastDialog> {
             : await _dlna.play(_dlnaConnected!);
       }
       _playing = !_playing;
+    });
+  }
+
+  void _startPositionPolling() {
+    _positionTimer?.cancel();
+    _positionTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
+      if (!mounted || _kind == null || _busy) return;
+      try {
+        if (_kind == _ConnectionKind.googleCast) {
+          setState(() {
+            _position = CastService.position;
+            _duration = CastService.duration;
+          });
+        } else if (_dlnaConnected != null) {
+          final info = await _dlna.position(_dlnaConnected!);
+          if (mounted) {
+            setState(() {
+              _position = info.position;
+              _duration = info.duration;
+            });
+          }
+        }
+      } catch (error) {
+        developer.log('Falha ao consultar posição', name: 'StreamBox.Cast', error: error);
+      }
+    });
+  }
+
+  Future<void> _seek(double milliseconds) async {
+    final position = Duration(milliseconds: milliseconds.round());
+    await _runRemoteAction(() async {
+      if (_kind == _ConnectionKind.googleCast) await CastService.seek(position);
+      if (_kind == _ConnectionKind.dlna && _dlnaConnected != null) {
+        await _dlna.seek(_dlnaConnected!, position);
+      }
+      _position = position;
+    });
+  }
+
+  Future<void> _stopRemote() async {
+    await _runRemoteAction(() async {
+      if (_kind == _ConnectionKind.googleCast) await CastService.stop();
+      if (_kind == _ConnectionKind.dlna && _dlnaConnected != null) {
+        await _dlna.stop(_dlnaConnected!);
+      }
+      _playing = false;
+      _position = Duration.zero;
     });
   }
 
@@ -153,23 +249,46 @@ class _CastDialogState extends State<CastDialog> {
       _kind = null;
       _dlnaConnected = null;
       _message = 'TV desconectada. A reprodução continua no celular.';
+      _positionTimer?.cancel();
     });
   }
 
   @override
   void dispose() {
+    _positionTimer?.cancel();
     _dlnaSubscription?.cancel();
-    _dlna.dispose();
+    unawaited(_dlna.dispose());
     super.dispose();
+  }
+
+  Future<void> _close() async {
+    _positionTimer?.cancel();
+    _operationGeneration++;
+    CastService.stopDiscovery();
+    await _dlna.stopDiscovery();
+    if (_kind == _ConnectionKind.googleCast) {
+      try {
+        await CastService.disconnect();
+      } catch (_) {}
+    }
+    if (_kind == _ConnectionKind.dlna) {
+      await _dlna.disconnect();
+    }
+    if (mounted) Navigator.pop(context, true);
   }
 
   @override
   Widget build(BuildContext context) {
-    return Dialog.fullscreen(
-      child: Scaffold(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _close();
+      },
+      child: Dialog.fullscreen(
+        child: Scaffold(
         appBar: AppBar(
           leading: IconButton(
-            onPressed: () => Navigator.pop(context),
+            onPressed: _close,
             icon: const Icon(Icons.close),
           ),
           title: const Text('Transmitir para TV'),
@@ -186,6 +305,27 @@ class _CastDialogState extends State<CastDialog> {
             padding: const EdgeInsets.all(16),
             children: [
               if (_busy || _discovering) const LinearProgressIndicator(),
+              if (_busy)
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton.icon(
+                    onPressed: _cancelOperation,
+                    icon: const Icon(Icons.cancel_outlined),
+                    label: const Text('Cancelar conexão'),
+                  ),
+                ),
+              if (_discovering)
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton.icon(
+                    onPressed: () async {
+                      await _dlna.stopDiscovery();
+                      if (mounted) setState(() => _discovering = false);
+                    },
+                    icon: const Icon(Icons.cancel_outlined),
+                    label: const Text('Cancelar busca'),
+                  ),
+                ),
               if (_message != null)
                 Card(
                   color: Theme.of(context).colorScheme.surfaceContainerHighest,
@@ -216,7 +356,7 @@ class _CastDialogState extends State<CastDialog> {
                         ListTile(
                           leading: const CircleAvatar(child: Icon(Icons.cast)),
                           title: Text(device.friendlyName),
-                          subtitle: Text(device.modelName ?? 'Google Cast'),
+                          subtitle: Text('Google Cast • ${device.modelName ?? 'Chromecast'}'),
                           enabled: !_busy,
                           onTap: () => _connectCast(device),
                         ),
@@ -238,7 +378,7 @@ class _CastDialogState extends State<CastDialog> {
                 ListTile(
                   leading: const CircleAvatar(child: Icon(Icons.tv)),
                   title: Text(device.name),
-                  subtitle: Text(device.model ?? 'Reprodutor DLNA/UPnP'),
+                  subtitle: Text('DLNA • ${_brandName(device.brand)} • ${device.model ?? 'UPnP'}'),
                   enabled: !_busy,
                   onTap: () => _connectDlna(device),
                 ),
@@ -251,6 +391,7 @@ class _CastDialogState extends State<CastDialog> {
               ),
             ],
           ),
+        ),
         ),
       ),
     );
@@ -273,6 +414,11 @@ class _CastDialogState extends State<CastDialog> {
                   tooltip: _playing ? 'Pausar na TV' : 'Reproduzir na TV',
                   icon: Icon(_playing ? Icons.pause : Icons.play_arrow),
                 ),
+                IconButton(
+                  onPressed: _busy ? null : _stopRemote,
+                  tooltip: 'Parar na TV',
+                  icon: const Icon(Icons.stop),
+                ),
                 Expanded(
                   child: Slider(
                     value: _volume,
@@ -288,6 +434,17 @@ class _CastDialogState extends State<CastDialog> {
                 ),
               ],
             ),
+            if (_duration > Duration.zero)
+              Slider(
+                value: _position.inMilliseconds
+                    .clamp(0, _duration.inMilliseconds)
+                    .toDouble(),
+                max: _duration.inMilliseconds.toDouble(),
+                onChanged: _busy ? null : (value) => setState(
+                  () => _position = Duration(milliseconds: value.round()),
+                ),
+                onChangeEnd: _seek,
+              ),
             DropdownButtonFormField<Channel>(
               initialValue: availableChannels.contains(_channel) ? _channel : null,
               decoration: const InputDecoration(labelText: 'Trocar canal'),
@@ -303,4 +460,15 @@ class _CastDialogState extends State<CastDialog> {
       ),
     );
   }
+
+  String _brandName(TvBrand brand) => switch (brand) {
+        TvBrand.samsung => 'Samsung',
+        TvBrand.lg => 'LG',
+        TvBrand.tcl => 'TCL',
+        TvBrand.philco => 'Philco',
+        TvBrand.sempToshiba => 'Semp/Toshiba',
+        TvBrand.androidTv => 'Android TV',
+        TvBrand.googleTv => 'Google TV',
+        TvBrand.other => 'Smart TV',
+      };
 }
