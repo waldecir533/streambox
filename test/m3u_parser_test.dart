@@ -33,4 +33,21 @@ https://example.com/live.m3u8
     expect(channels, hasLength(1));
     expect(channels.single.name, 'Canal seguro');
   });
+
+  test('preserves User-Agent and Referer options for remote playback', () {
+    const source = '''
+#EXTM3U
+#EXTINF:-1,Canal protegido
+#EXTVLCOPT:http-user-agent=StreamBox/1.0
+#EXTVLCOPT:http-referrer=https://example.com/player
+#EXTHTTP:{"Authorization":"Bearer secret"}
+https://cdn.example.com/live.m3u8
+''';
+
+    final channel = const M3uParser().parse(source).single;
+
+    expect(channel.headers['User-Agent'], 'StreamBox/1.0');
+    expect(channel.headers['Referer'], 'https://example.com/player');
+    expect(channel.headers['Authorization'], 'Bearer secret');
+  });
 }

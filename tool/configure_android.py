@@ -20,8 +20,10 @@ for permission in (
     'android.permission.ACCESS_NETWORK_STATE',
     'android.permission.ACCESS_WIFI_STATE',
     'android.permission.CHANGE_WIFI_MULTICAST_STATE',
+    'android.permission.CHANGE_NETWORK_STATE',
     'android.permission.FOREGROUND_SERVICE',
     'android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK',
+    'android.permission.NEARBY_WIFI_DEVICES',
 ):
     if permission not in text:
         text = text.replace(
@@ -29,6 +31,20 @@ for permission in (
             f'    <uses-permission android:name="{permission}" />\n\n    <application',
             1,
         )
+
+if 'android.permission.ACCESS_FINE_LOCATION' not in text:
+    text = text.replace(
+        '<application',
+        '    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" '
+        'android:maxSdkVersion="32" />\n\n    <application',
+        1,
+    )
+
+text = text.replace(
+    '<uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />',
+    '<uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" '
+    'android:usesPermissionFlags="neverForLocation" />',
+)
 
 if 'com.google.android.gms.cast.framework.OPTIONS_PROVIDER_CLASS_NAME' not in text:
     cast_config = '''

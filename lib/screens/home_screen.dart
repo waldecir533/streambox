@@ -117,7 +117,7 @@ class _HomeScreenState extends State<HomeScreen> {
     m3u.dispose(); server.dispose(); user.dispose(); pass.dispose();
   }
 
-  Future<void> _open(Channel channel) async { await _prefs.addHistory(channel.id); _history = await _prefs.history(); if (mounted) { setState(() {}); await Navigator.push(context, MaterialPageRoute<void>(builder: (_) => PlayerScreen(channel: channel))); } }
+  Future<void> _open(Channel channel) async { await _prefs.addHistory(channel.id); _history = await _prefs.history(); if (mounted) { setState(() {}); await Navigator.push(context, MaterialPageRoute<void>(builder: (_) => PlayerScreen(channel: channel, channels: _channels))); } }
   Future<void> _favorite(Channel channel) async { final value = !_favorites.contains(channel.id); await _prefs.setFavorite(channel.id, value); _favorites = await _prefs.favorites(); if (mounted) setState(() {}); }
 
   @override void dispose() { _playlist.dispose(); _xtream.dispose(); _search.dispose(); super.dispose(); }

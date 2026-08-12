@@ -15,6 +15,7 @@ void main() {
         url: 'https://example.com/live.m3u8',
         group: 'Notícias',
         tvgId: 'news',
+        headers: {'Authorization': 'Bearer test-token'},
       ),
     ];
 
@@ -25,6 +26,7 @@ void main() {
     expect(restored.single.name, 'Canal salvo');
     expect(restored.single.url, channels.single.url);
     expect(restored.single.group, 'Notícias');
+    expect(restored.single.headers['Authorization'], 'Bearer test-token');
   });
 
   test('ignores an invalid cached list without deleting saved access', () async {
