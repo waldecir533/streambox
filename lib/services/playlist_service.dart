@@ -54,8 +54,9 @@ class PlaylistService {
       throw const FormatException('A lista retornou vazia do servidor.');
     }
 
-    // Análise em Isolate separado (não trava a interface com listas grandes)
-    // e com timeout próprio, independente do download.
+    // Análise incremental em Isolate separado (não trava a interface com
+    // listas grandes): os canais chegam em lotes, linhas inválidas são
+    // apenas ignoradas e o progresso é real (fração do texto enviado).
     final channels = await _parser.parseAsync(
       body,
       timeout: const Duration(minutes: 2),

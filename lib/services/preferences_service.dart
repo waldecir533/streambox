@@ -1,9 +1,7 @@
-import 'dart:convert';
-
-import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/channel.dart';
+import 'channels_store.dart';
 
 class PreferencesService {
   static const _favoritesKey = 'favorite_channel_ids';
@@ -12,7 +10,11 @@ class PreferencesService {
   static const _epgKey = 'epg_url';
   static const _channelsKey = 'cached_channels';
 
+  final ChannelsStore _channelsStore = ChannelsStore();
+
   Future<SharedPreferences> get _prefs => SharedPreferences.getInstance();
+
+  ChannelsStore get channelsStore => _channelsStore;
   Future<Set<String>> favorites() async => (await _prefs).getStringList(_favoritesKey)?.toSet() ?? {};
   Future<List<String>> history() async => (await _prefs).getStringList(_historyKey) ?? [];
   Future<void> setFavorite(String id, bool value) async {
@@ -31,28 +33,20 @@ class PreferencesService {
   Future<String?> epgUrl() async => (await _prefs).getString(_epgKey);
   Future<void> savePlaylist(String value) async => (await _prefs).setString(_playlistKey, value);
   Future<void> saveEpg(String value) async => (await _prefs).setString(_epgKey, value);
-  Future<List<Channel>> cachedChannels() async {
-    final raw = (await _prefs).getString(_channelsKey);
-    if (raw == null || raw.isEmpty) return const [];
-    try {
-      final decoded = jsonDecode(raw);
-      if (decoded is! List) return const [];
-      return decoded
-          .whereType<Map<String, dynamic>>()
-          .map(Channel.fromJson)
-          .toList(growable: false);
-    } catch (_) {
-      return const [];
-    }
-  }
-  /// Serializa e salva os canais em um Isolate separado, evitando travar a
-  /// interface ao persistir listas grandes.
-  Future<void> saveChannels(List<Channel> channels) async {
-    final serialized = await compute(_encodeChannels, channels);
-    await (await _prefs).setString(_channelsKey, serialized);
+  /// Carrega os canais já persistidos em arquivo (NDJSON), decodificando
+  /// em Isolate separado com tolerância a linhas corrompidas — nunca carrega
+  /// uma cópia JSON gigante na memória do aplicativo.
+  Future<List<Channel>> cachedChannels() => _channelsStore.loadAll();
+
+  /// Salva os canais em arquivo (NDJSON), gravando em lotes pequenos para
+  /// listas grandes. Antes da gravação, o conteúdo anterior é removido.
+  Future<int> saveChannels(List<Channel> channels) async {
+    await _channelsStore.clear();
+    await _channelsStore.append(channels);
+    return channels.length;
   }
 
-  static String _encodeChannels(List<Channel> channels) =>
-      jsonEncode(channels.map((channel) => channel.toJson()).toList());
-  Future<void> clearAccess() async { final p = await _prefs; await p.remove(_playlistKey); await p.remove(_epgKey); await p.remove(_channelsKey); }
+  Future<int> channelsCount() => _channelsStore.count();
+
+  Future<void> clearAccess() async { final p = await _prefs; await p.remove(_playlistKey); await p.remove(_epgKey); await p.remove(_channelsKey); await _channelsStore.clear(); }
 }
