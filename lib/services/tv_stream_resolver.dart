@@ -5,7 +5,6 @@ import 'dart:developer' as developer;
 import 'package:http/http.dart' as http;
 
 import '../models/channel.dart';
-import 'stream_proxy_service.dart';
 
 class TvStreamException implements Exception {
   const TvStreamException(this.message, {this.authorization = false});
@@ -16,14 +15,11 @@ class TvStreamException implements Exception {
 class TvStreamResolver {
   TvStreamResolver({
     http.Client? client,
-    StreamProxyService? localProxy,
     this.backendUrl = const String.fromEnvironment('STREAMBOX_PROXY_URL'),
     this.backendToken = const String.fromEnvironment('STREAMBOX_PROXY_TOKEN'),
-  })  : _client = client ?? http.Client(),
-        _localProxy = localProxy ?? StreamProxyService();
+  }) : _client = client ?? http.Client();
 
   final http.Client _client;
-  final StreamProxyService _localProxy;
   final String backendUrl;
   final String backendToken;
 
@@ -36,16 +32,14 @@ class TvStreamResolver {
       developer.log('Preparando URL opaca no proxy backend', name: 'StreamBox.Proxy');
       return _resolveWithBackend(channel);
     }
-    if (channel.headers.keys.any(
-      (key) => key.toLowerCase() == HttpHeaders.authorizationHeader,
-    )) {
-      throw const TvStreamException(
-        'Este canal exige autorização. Configure o proxy seguro para transmitir sem expor credenciais.',
-        authorization: true,
-      );
-    }
-    developer.log('Usando proxy local com token opaco', name: 'StreamBox.Proxy');
-    return _localProxy.urlFor(channel);
+    throw TvStreamException(
+      channel.headers.keys.any(
+        (key) => key.toLowerCase() == HttpHeaders.authorizationHeader,
+      )
+          ? 'Este canal exige autorização. Configure o proxy seguro para transmitir sem expor credenciais.'
+          : 'Este canal exige cabeçalhos ou uma URL temporária. Configure o proxy seguro para transmitir na TV.',
+      authorization: true,
+    );
   }
 
   bool _requiresProxy(Channel channel) {
@@ -93,8 +87,8 @@ class TvStreamResolver {
     }
   }
 
-  Future<void> dispose() async {
-    await _localProxy.dispose();
+  Future<void> dispose() {
     _client.close();
+    return Future.value();
   }
 }

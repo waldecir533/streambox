@@ -4,12 +4,12 @@ import 'package:android_intent_plus/android_intent.dart';
 import 'package:flutter_chrome_cast/flutter_chrome_cast.dart';
 
 import '../models/channel.dart';
-import 'stream_proxy_service.dart';
+import 'tv_stream_resolver.dart';
 
 class CastService {
   CastService._();
 
-  static final StreamProxyService _proxy = StreamProxyService();
+  static final TvStreamResolver _streamResolver = TvStreamResolver();
 
   static Stream<List<GoogleCastDevice>> get devices =>
       GoogleCastDiscoveryManager.instance.devicesStream;
@@ -38,15 +38,12 @@ class CastService {
         'Formato incompatível com transmissão para TV.',
       );
     }
-    final remoteUrl = channel.headers.isEmpty
-        ? Uri.parse(channel.url)
-        : await _proxy.urlFor(channel);
+    final remoteUrl = await _streamResolver.resolve(channel);
     final media = GoogleCastMediaInformation(
       contentId: remoteUrl.toString(),
       contentUrl: remoteUrl,
       contentType: contentType,
       streamType: CastMediaStreamType.live,
-      customData: channel.headers.isEmpty ? null : {'headers': channel.headers},
       metadata: GoogleCastMovieMediaMetadata(
         title: channel.name,
         subtitle: 'Transmitindo pelo StreamBox',
@@ -66,7 +63,6 @@ class CastService {
 
   static Future<void> disconnect() async {
     await GoogleCastSessionManager.instance.endSessionAndStopCasting();
-    await _proxy.dispose();
   }
 
   static Future<void> play() => GoogleCastRemoteMediaClient.instance.play();

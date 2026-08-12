@@ -53,4 +53,26 @@ void main() {
     );
     await resolver.dispose();
   });
+
+  test('requires secure backend for Referer and User-Agent headers', () async {
+    final resolver = TvStreamResolver();
+    const channel = Channel(
+      name: 'Com cabeçalhos',
+      url: 'https://origin.example.com/live.ts',
+      headers: {
+        'Referer': 'https://origin.example.com/',
+        'User-Agent': 'StreamBox',
+      },
+    );
+
+    await expectLater(
+      resolver.resolve(channel),
+      throwsA(
+        isA<TvStreamException>()
+            .having((error) => error.authorization, 'authorization', isTrue)
+            .having((error) => error.message, 'message', contains('proxy seguro')),
+      ),
+    );
+    await resolver.dispose();
+  });
 }

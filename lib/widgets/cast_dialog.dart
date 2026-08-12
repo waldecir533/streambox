@@ -7,19 +7,30 @@ import 'package:flutter_chrome_cast/flutter_chrome_cast.dart';
 import '../models/channel.dart';
 import '../services/cast_service.dart';
 import '../services/dlna_service.dart';
+import '../services/tv_stream_resolver.dart';
 
 enum _ConnectionKind { googleCast, dlna }
+
+class _TvTarget {
+  const _TvTarget.cast(this.castDevice) : dlnaDevice = null;
+  const _TvTarget.dlna(this.dlnaDevice) : castDevice = null;
+
+  final GoogleCastDevice? castDevice;
+  final DlnaDevice? dlnaDevice;
+}
 
 class CastDialog extends StatefulWidget {
   const CastDialog({
     super.key,
     required this.channel,
     this.channels = const [],
+    this.onConnectionStarted,
     this.onConnectionFailed,
   });
 
   final Channel channel;
   final List<Channel> channels;
+  final VoidCallback? onConnectionStarted;
   final VoidCallback? onConnectionFailed;
 
   @override
@@ -73,6 +84,7 @@ class _CastDialogState extends State<CastDialog> {
   }
 
   Future<void> _connectCast(GoogleCastDevice device) async {
+    widget.onConnectionStarted?.call();
     await _runRemoteAction(() async {
       await CastService.cast(_channel, device);
       _kind = _ConnectionKind.googleCast;
@@ -82,6 +94,7 @@ class _CastDialogState extends State<CastDialog> {
   }
 
   Future<void> _connectDlna(DlnaDevice device) async {
+    widget.onConnectionStarted?.call();
     await _runRemoteAction(() async {
       await _dlna.connect(device, _channel);
       _dlnaConnected = device;
@@ -117,6 +130,35 @@ class _CastDialogState extends State<CastDialog> {
         });
       }
       widget.onConnectionFailed?.call();
+    } on TvStreamException catch (error) {
+      developer.log(
+        'Falha ao preparar stream remoto',
+        name: 'StreamBox.Cast',
+        error: error,
+      );
+      if (mounted) {
+        setState(() {
+          _message = error.message;
+          _kind = null;
+          _dlnaConnected = null;
+        });
+      }
+      widget.onConnectionFailed?.call();
+    } on FormatException catch (error) {
+      developer.log(
+        'Formato de stream incompatível',
+        name: 'StreamBox.Cast',
+        error: error,
+      );
+      if (mounted) {
+        setState(() {
+          _message =
+              'A TV não aceita o formato ou codec deste canal. A reprodução continua no celular.';
+          _kind = null;
+          _dlnaConnected = null;
+        });
+      }
+      widget.onConnectionFailed?.call();
     } catch (error, stackTrace) {
       developer.log(
         'Falha inesperada na transmissão',
@@ -141,6 +183,7 @@ class _CastDialogState extends State<CastDialog> {
 
   Future<void> _cancelOperation() async {
     _operationGeneration++;
+    CastService.stopDiscovery();
     await _dlna.stopDiscovery();
     if (mounted) {
       setState(() {
@@ -337,51 +380,64 @@ class _CastDialogState extends State<CastDialog> {
               if (_kind != null) _remoteControls(),
               const Padding(
                 padding: EdgeInsets.only(top: 20, bottom: 8),
-                child: Text('Google Cast / Chromecast', style: TextStyle(fontWeight: FontWeight.bold)),
+                child: Text(
+                  'Dispositivos disponíveis',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
               ),
               StreamBuilder<List<GoogleCastDevice>>(
                 stream: CastService.devices,
                 builder: (context, snapshot) {
-                  final devices = snapshot.data ?? const <GoogleCastDevice>[];
-                  if (devices.isEmpty) {
+                  final targets = <_TvTarget>[
+                    ...?snapshot.data?.map(_TvTarget.cast),
+                    ..._dlnaDevices.map(_TvTarget.dlna),
+                  ]..sort((left, right) {
+                      final leftName = left.castDevice?.friendlyName ??
+                          left.dlnaDevice?.name ??
+                          '';
+                      final rightName = right.castDevice?.friendlyName ??
+                          right.dlnaDevice?.name ??
+                          '';
+                      return leftName.toLowerCase().compareTo(
+                            rightName.toLowerCase(),
+                          );
+                    });
+                  if (targets.isEmpty) {
                     return const ListTile(
-                      leading: Icon(Icons.cast),
-                      title: Text('Nenhum Chromecast encontrado'),
-                      subtitle: Text('Confirme que o celular e a TV estão na mesma rede Wi-Fi.'),
+                      leading: Icon(Icons.tv_off_outlined),
+                      title: Text('Nenhuma TV compatível encontrada'),
+                      subtitle: Text(
+                        'Confirme que a TV e o celular estão na mesma rede Wi-Fi e que DLNA/UPnP ou Google Cast está ativo.',
+                      ),
                     );
                   }
                   return Column(
                     children: [
-                      for (final device in devices)
+                      for (final target in targets)
                         ListTile(
-                          leading: const CircleAvatar(child: Icon(Icons.cast)),
-                          title: Text(device.friendlyName),
-                          subtitle: Text('Google Cast • ${device.modelName ?? 'Chromecast'}'),
+                          leading: CircleAvatar(
+                            child: Icon(
+                              target.castDevice != null ? Icons.cast : Icons.tv,
+                            ),
+                          ),
+                          title: Text(
+                            target.castDevice?.friendlyName ??
+                                target.dlnaDevice!.name,
+                          ),
+                          subtitle: Text(
+                            target.castDevice != null
+                                ? 'Google Cast • ${target.castDevice!.modelName ?? 'Chromecast'}'
+                                : 'DLNA/UPnP • ${_brandName(target.dlnaDevice!.brand)} • ${target.dlnaDevice!.model ?? 'MediaRenderer'}',
+                          ),
                           enabled: !_busy,
-                          onTap: () => _connectCast(device),
+                          onTap: () => target.castDevice != null
+                              ? _connectCast(target.castDevice!)
+                              : _connectDlna(target.dlnaDevice!),
                         ),
                     ],
                   );
                 },
               ),
-              const Padding(
-                padding: EdgeInsets.only(top: 20, bottom: 8),
-                child: Text('Smart TVs (DLNA)', style: TextStyle(fontWeight: FontWeight.bold)),
-              ),
-              if (_dlnaDevices.isEmpty)
-                const ListTile(
-                  leading: Icon(Icons.tv),
-                  title: Text('Nenhuma Smart TV DLNA encontrada'),
-                  subtitle: Text('Ative DLNA/UPnP na TV e mantenha os aparelhos na mesma rede.'),
-                ),
-              for (final device in _dlnaDevices)
-                ListTile(
-                  leading: const CircleAvatar(child: Icon(Icons.tv)),
-                  title: Text(device.name),
-                  subtitle: Text('DLNA • ${_brandName(device.brand)} • ${device.model ?? 'UPnP'}'),
-                  enabled: !_busy,
-                  onTap: () => _connectDlna(device),
-                ),
               const Divider(height: 32),
               ListTile(
                 leading: const Icon(Icons.screen_share),
@@ -422,8 +478,16 @@ class _CastDialogState extends State<CastDialog> {
                 Expanded(
                   child: Slider(
                     value: _volume,
-                    onChanged: _busy ? null : (value) => setState(() => _volume = value),
-                    onChangeEnd: _setVolume,
+                    onChanged: _busy ||
+                            (_kind == _ConnectionKind.dlna &&
+                                !(_dlnaConnected?.supportsVolume ?? false))
+                        ? null
+                        : (value) => setState(() => _volume = value),
+                    onChangeEnd: _busy ||
+                            (_kind == _ConnectionKind.dlna &&
+                                !(_dlnaConnected?.supportsVolume ?? false))
+                        ? null
+                        : _setVolume,
                   ),
                 ),
                 const Icon(Icons.volume_up),

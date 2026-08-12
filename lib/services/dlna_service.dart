@@ -47,6 +47,8 @@ class DlnaDevice {
   final String connectionManagerServiceType;
   final Uri? renderingControlUrl;
   final String renderingControlServiceType;
+
+  bool get supportsVolume => renderingControlUrl != null;
 }
 
 enum DlnaErrorKind { authorization, connection, incompatibleFormat }
@@ -66,12 +68,17 @@ class DlnaService {
     this.connectionTimeout = const Duration(seconds: 8),
   }) : _client = client ?? http.Client();
 
-  static const _searchTarget = 'urn:schemas-upnp-org:device:MediaRenderer:1';
+  static const _searchTargets = <String>[
+    'urn:schemas-upnp-org:device:MediaRenderer:1',
+    'urn:schemas-upnp-org:device:MediaRenderer:2',
+    'upnp:rootdevice',
+  ];
   final http.Client _client;
   final Duration searchTimeout;
   final Duration connectionTimeout;
   final _devicesController = StreamController<List<DlnaDevice>>.broadcast();
   final Map<String, DlnaDevice> _devices = {};
+  final Set<String> _pendingLocations = {};
   final TvStreamResolver _streamResolver = TvStreamResolver();
   RawDatagramSocket? _socket;
   Timer? _finishTimer;
@@ -89,6 +96,7 @@ class DlnaService {
     final completion = Completer<void>();
     _discoveryCompleter = completion;
     _devices.clear();
+    _pendingLocations.clear();
     _devicesController.add(const []);
     developer.log('Iniciando descoberta SSDP/UPnP', name: 'StreamBox.DLNA');
     try {
@@ -102,20 +110,22 @@ class DlnaService {
           stopDiscovery();
         },
       );
-      final request = [
-        'M-SEARCH * HTTP/1.1',
-        'HOST: 239.255.255.250:1900',
-        'MAN: "ssdp:discover"',
-        'MX: 3',
-        'ST: $_searchTarget',
-        '',
-        '',
-      ].join('\r\n');
-      socket.send(
-        utf8.encode(request),
-        InternetAddress('239.255.255.250'),
-        1900,
-      );
+      for (final target in _searchTargets) {
+        final request = [
+          'M-SEARCH * HTTP/1.1',
+          'HOST: 239.255.255.250:1900',
+          'MAN: "ssdp:discover"',
+          'MX: 3',
+          'ST: $target',
+          '',
+          '',
+        ].join('\r\n');
+        socket.send(
+          utf8.encode(request),
+          InternetAddress('239.255.255.250'),
+          1900,
+        );
+      }
       _finishTimer = Timer(duration ?? searchTimeout, stopDiscovery);
       await completion.future;
     } on SocketException {
@@ -135,7 +145,13 @@ class DlnaService {
     final rawLocation = headers['location'];
     if (rawLocation == null) return;
     final location = Uri.tryParse(rawLocation);
-    if (location == null || _devices.containsKey(location.toString())) return;
+    final locationKey = location?.toString();
+    if (location == null ||
+        locationKey == null ||
+        _devices.values.any((device) => device.location == location) ||
+        !_pendingLocations.add(locationKey)) {
+      return;
+    }
     try {
       final device = await _loadDescription(location);
       if (device != null && generation == _discoveryGeneration && !_disposed) {
@@ -151,6 +167,8 @@ class DlnaService {
         stackTrace: stackTrace,
       );
       // Other SSDP devices may return incomplete descriptions; ignore them.
+    } finally {
+      _pendingLocations.remove(locationKey);
     }
   }
 
@@ -187,10 +205,11 @@ class DlnaService {
 
   DlnaDevice? parseDeviceDescription(Uri location, String xml) {
     final document = XmlDocument.parse(xml);
-    final deviceNode = document.descendants
+    final deviceNodes = document.descendants
         .whereType<XmlElement>()
         .where((element) => element.name.local == 'device')
-        .firstOrNull;
+        .toList(growable: false);
+    final deviceNode = deviceNodes.reversed.where(_hasAvTransport).firstOrNull;
     if (deviceNode == null) return null;
     final urlBaseText = document.descendants
         .whereType<XmlElement>()
@@ -259,6 +278,18 @@ class DlnaService {
       .firstOrNull
       ?.innerText
       .trim();
+
+  bool _hasAvTransport(XmlElement device) {
+    final directServices = device.children
+        .whereType<XmlElement>()
+        .where((element) => element.name.local == 'serviceList')
+        .expand((list) => list.children.whereType<XmlElement>())
+        .where((element) => element.name.local == 'service');
+    return directServices.any(
+      (service) =>
+          (_childText(service, 'serviceType') ?? '').contains(':AVTransport:'),
+    );
+  }
 
   int _serviceVersion(String? serviceType) =>
       int.tryParse(serviceType?.split(':').last ?? '') ?? -1;

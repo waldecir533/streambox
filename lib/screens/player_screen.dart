@@ -339,6 +339,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       builder: (_) => CastDialog(
         channel: widget.channel,
         channels: widget.channels,
+        onConnectionStarted: () => unawaited(_pauseLocal()),
         onConnectionFailed: () {
           if (wasPlaying) unawaited(_resumeLocal());
         },

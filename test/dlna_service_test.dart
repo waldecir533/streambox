@@ -82,6 +82,66 @@ void main() {
     await service.dispose();
   });
 
+  test('selects embedded MediaRenderer and services advertised by any vendor',
+      () async {
+    final service = DlnaService();
+    const description = '''
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+  <device>
+    <friendlyName>LG webOS Root</friendlyName>
+    <manufacturer>LG Electronics</manufacturer>
+    <deviceList>
+      <device>
+        <deviceType>urn:schemas-upnp-org:device:MediaRenderer:2</deviceType>
+        <friendlyName>TV da sala</friendlyName>
+        <manufacturer>LG Electronics</manufacturer>
+        <modelName>webOS TV</modelName>
+        <UDN>uuid:generic-renderer</UDN>
+        <serviceList>
+          <service>
+            <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
+            <controlURL>/control/avt1</controlURL>
+          </service>
+          <service>
+            <serviceType>urn:schemas-upnp-org:service:AVTransport:3</serviceType>
+            <controlURL>/control/avt3</controlURL>
+          </service>
+          <service>
+            <serviceType>urn:schemas-upnp-org:service:RenderingControl:2</serviceType>
+            <controlURL>/control/rendering</controlURL>
+          </service>
+          <service>
+            <serviceType>urn:schemas-upnp-org:service:ConnectionManager:2</serviceType>
+            <controlURL>/control/connection</controlURL>
+          </service>
+        </serviceList>
+      </device>
+    </deviceList>
+  </device>
+</root>
+''';
+
+    final parsed = service.parseDeviceDescription(
+      Uri.parse('http://192.168.1.80:1400/device.xml'),
+      description,
+    );
+
+    expect(parsed, isNotNull);
+    expect(parsed!.id, 'uuid:generic-renderer');
+    expect(parsed.name, 'TV da sala');
+    expect(parsed.brand, TvBrand.lg);
+    expect(parsed.avTransportServiceType,
+        'urn:schemas-upnp-org:service:AVTransport:3');
+    expect(parsed.avTransportControlUrl.toString(),
+        'http://192.168.1.80:1400/control/avt3');
+    expect(parsed.renderingControlServiceType,
+        'urn:schemas-upnp-org:service:RenderingControl:2');
+    expect(parsed.supportsVolume, isTrue);
+    expect(parsed.connectionManagerServiceType,
+        'urn:schemas-upnp-org:service:ConnectionManager:2');
+    await service.dispose();
+  });
+
   test('reports authorization error separately from connection failure', () async {
     final client = MockClient((_) async => http.Response('<error>denied</error>', 403));
     final service = DlnaService(client: client);
