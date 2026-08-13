@@ -39,12 +39,12 @@ class PreferencesService {
   Future<List<Channel>> cachedChannels() => _channelsStore.loadAll();
 
   /// Salva os canais em arquivo (NDJSON), gravando em lotes pequenos para
-  /// listas grandes. Antes da gravação, o conteúdo anterior é removido.
-  Future<int> saveChannels(List<Channel> channels) async {
-    await _channelsStore.clear();
-    await _channelsStore.append(channels);
-    return channels.length;
-  }
+  /// listas grandes. A substituição é **transacional**: os canais novos são
+  /// gravados em um arquivo temporário e só no final o arquivo atual é
+  /// substituído de forma atômica — a lista anterior permanece intacta se
+  /// algo falhar no meio.
+  Future<int> saveChannels(List<Channel> channels) =>
+      _channelsStore.saveAll(channels);
 
   Future<int> channelsCount() => _channelsStore.count();
 

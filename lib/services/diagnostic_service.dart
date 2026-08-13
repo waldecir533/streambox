@@ -79,6 +79,10 @@ class DiagnosticService {
     sb.writeln('Canais analisados: ${diag.analyzedCount}');
     sb.writeln('Canais salvos: ${diag.savedCount}');
     sb.writeln('Linhas ignoradas (inválidas): ${diag.skippedLines}');
+    sb.writeln('Fonte detectada: ${diag.detectedSource}');
+    if (diag.importTimeSeconds != null) {
+      sb.writeln('Duração da importação: ${diag.importTimeSeconds!.toStringAsFixed(1)} s');
+    }
 
     if (diag.errorMessage != null) {
       sb.writeln('--- Exceção (sanitizada) ---');
@@ -164,6 +168,12 @@ class ImportDiagnostic {
   String? failurePhase;
   String? errorMessage;
   String? stackTrace;
+
+  /// Tipo de fonte detectado pela inspeção (playlist, HLS, HTML, JSON...).
+  String detectedSource = 'não detectado';
+
+  /// Duração da importação, em segundos.
+  double? importTimeSeconds;
 
   factory ImportDiagnostic.fromJson(Map<String, dynamic> json) => ImportDiagnostic.empty();
   Map<String, dynamic> toJson() => const {};

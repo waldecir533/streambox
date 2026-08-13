@@ -2,8 +2,10 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import '../models/channel.dart';
+import '../models/import_summary.dart';
 import '../services/diagnostic_service.dart';
 import '../services/epg_service.dart';
+import '../services/m3u_parser.dart';
 import '../services/playlist_service.dart';
 import '../services/preferences_service.dart';
 import '../services/xtream_service.dart';
@@ -80,45 +82,67 @@ class _HomeScreenState extends State<HomeScreen> {
       ..analyzedCount = 0
       ..savedCount = 0
       ..skippedLines = 0
+      ..detectedSource = 'não detectado'
+      ..importTimeSeconds = null
       ..failurePhase = null
       ..errorMessage = null
       ..stackTrace = null;
 
-
+    final stopwatch = Stopwatch()..start();
     try {
-      final data = await _playlist.loadFromUrl(url, onProgress: (p) {
+      // Download + inspeção do tipo de fonte + análise, com mensagens
+      // específicas por tipo de erro (401, 404, timeout, HTML...). A lista
+      // anterior nunca é apagada: a gravação nova é transacional.
+      final result = await _playlist.importFromUrl(url, onProgress: (p) {
         if (mounted) setState(() => _progress = p);
       });
+      stopwatch.stop();
+      diag.detectedSource = result.sourceType?.name ?? 'desconhecido';
+      diag.importTimeSeconds = stopwatch.elapsedMilliseconds / 1000;
+
+      // Fonte não é uma playlist: mostra a mensagem específica e oferece
+      // salvar como canal avulso quando for um stream individual.
+      if (!result.isSuccess) {
+        if (result.isIndividualStream) {
+          if (mounted) _showSaveStreamDialog(url, result.sourceType == SourceType.hlsStream);
+        } else {
+          throw ImportSourceException(result.message ?? 'Conteúdo não reconhecido.');
+        }
+        return;
+      }
+
+      final data = result.channels;
       diag.analyzedCount = data.length;
+      diag.skippedLines = result.skippedLines;
       diag.failurePhase = 'gravação dos canais';
 
-      // Gravação incremental em arquivo (sem carregar tudo na memória).
+      // Gravação transacional em arquivo (não apaga a lista atual antes de
+      // terminar; falha no meio mantém os canais salvos anteriores).
       await _prefs.saveChannels(data);
       await _prefs.savePlaylist(url);
       diag.savedCount = data.length;
       diag.failurePhase = null;
 
+      final summary = ImportSummary.fromChannels(
+        channels: data,
+        skippedLines: result.skippedLines,
+        bytes: result.bytes,
+        durationSeconds: stopwatch.elapsedMilliseconds / 1000,
+      );
       if (mounted) {
         setState(() {
           _channels = data;
           _memoGroups = _computeGroups();
           _savedCount = data.length;
+          _skippedLines = result.skippedLines;
         });
+        _showImportSummaryDialog(summary);
       }
-    } on TimeoutException {
-      if (mounted) {
-        setState(() {
-          _error = restoring && _channels.isNotEmpty
-              ? 'Não foi possível atualizar a lista agora. Exibindo os canais salvos.'
-              : 'A conexão demorou mais que o esperado. Verifique sua internet e tente novamente.';
-          _retryPlaylistUrl = url;
-        });
-      }
-    } on FormatException catch (error) {
-      diag.failurePhase = 'análise da lista';
+    } on ImportSourceException catch (error) {
+      diag.failurePhase = 'reconhecimento da fonte';
       diag.errorMessage = '$error';
       if (mounted) {
-        setState(() => _error = 'Não foi possível ler essa lista. Confira o endereço e tente novamente.');
+        setState(() { _error = error.message; });
       }
     } catch (error, stack) {
       diag.failurePhase = diag.failurePhase ?? 'finalização da importação';
@@ -128,7 +152,7 @@ class _HomeScreenState extends State<HomeScreen> {
         setState(() {
           _error = restoring && _channels.isNotEmpty
               ? 'Não foi possível atualizar a lista agora. Exibindo os canais salvos.'
-              : 'Não foi possível carregar a lista. Verifique sua conexão e tente novamente.';
+              : error.toString();
           _retryPlaylistUrl = url;
         });
       }
@@ -136,6 +160,117 @@ class _HomeScreenState extends State<HomeScreen> {
     finally {
       if (mounted) setState(() { _loading = false; _progress = null; });
     }
+  }
+
+  /// Oferece salvar um stream individual como canal avulso com nome e
+  /// categoria escolhidos pelo usuário (não é uma lista M3U).
+  Future<void> _showSaveStreamDialog(String url, bool isHls) async {
+    final nameController = TextEditingController(text: isHls ? 'Stream HLS' : 'Vídeo direto');
+    final groupController = TextEditingController(text: 'Meus streams');
+    if (!mounted) {
+      nameController.dispose(); groupController.dispose();
+      return;
+    }
+    final saved = await showDialog<bool>(context: context, builder: (context) => AlertDialog(
+      title: const Text('Endereço de stream individual'),
+      content: Column(mainAxisSize: MainAxisSize.min, children: [
+        Text(isHls
+            ? 'Este endereço é um único stream (HLS), não uma lista com vários canais.'
+            : 'Este endereço é um fluxo de vídeo direto, não uma lista com vários canais.'),
+        const SizedBox(height: 16),
+        TextField(controller: nameController, decoration: const InputDecoration(labelText: 'Nome', border: OutlineInputBorder())),
+        const SizedBox(height: 8),
+        TextField(controller: groupController, decoration: const InputDecoration(labelText: 'Categoria', border: OutlineInputBorder())),
+      ]),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancelar')),
+        FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Salvar canal')),
+      ],
+    ));
+    nameController.dispose(); groupController.dispose();
+    if (saved == true) {
+      final channel = Channel(
+        name: nameController.text.trim().isEmpty ? 'Canal avulso' : nameController.text.trim(),
+        url: url.trim(),
+        group: groupController.text.trim().isEmpty ? 'Meus streams' : groupController.text.trim(),
+        sourceKind: SourceKind.individual,
+        contentType: isHls ? 'application/x-mpegURL' : null,
+      );
+      try {
+        final existing = await _prefs.cachedChannels();
+        final updated = [...existing, channel];
+        await _prefs.saveChannels(updated);
+        if (mounted) {
+          setState(() { _channels = updated; _memoGroups = _computeGroups(); });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Canal salvo com sucesso.')),
+          );
+        }
+      } catch (_) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Não foi possível salvar o canal agora.')),
+          );
+        }
+      }
+    }
+  }
+
+  void _showImportSummaryDialog(ImportSummary summary) {
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Importação concluída'),
+        content: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 420), child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('• ${summary.channels} canais importados'),
+            Text('• ${summary.groups} categorias organizadas'),
+            Text('• ${summary.movies} filmes identificados'),
+            Text('• ${summary.series} séries identificadas'),
+            Text('• ${summary.sports} conteúdos de esportes'),
+            if (summary.skippedLines > 0)
+              Text('• ${summary.skippedLines} entradas ignoradas por estarem inválidas'),
+            Text('• Tamanho da lista: ${summary.sizeDescription}'),
+            Text('• Tempo: ${summary.durationDescription}'),
+          ],
+        )),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Fechar')),
+          FilledButton(
+            onPressed: () {
+              Navigator.pop(context);
+              showDialog<void>(
+                context: context,
+                builder: (context) => AlertDialog(
+                  title: const Text('Detalhes da importação'),
+                  content: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 460), child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Canais importados: ${summary.channels}'),
+                      Text('Categorias: ${summary.groups}'),
+                      Text('Filmes identificados: ${summary.movies}'),
+                      Text('Séries identificadas: ${summary.series}'),
+                      Text('Esportes: ${summary.sports}'),
+                      Text('Entradas ignoradas: ${summary.skippedLines}'),
+                      Text('Tamanho: ${summary.sizeDescription}'),
+                      Text('Duração: ${summary.durationDescription}'),
+                      const SizedBox(height: 8),
+                      const Text('A classificação por filmes, séries e esportes usa as categorias da própria lista e pode ser ajustada depois em Personalização.'),
+                    ],
+                  )),
+                  actions: [FilledButton(onPressed: () => Navigator.pop(context), child: const Text('Entendi'))],
+                ),
+              );
+            },
+            child: const Text('Ver detalhes'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _exportDiagnosticReport() async {

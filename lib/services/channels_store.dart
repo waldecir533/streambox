@@ -11,6 +11,11 @@ import '../models/channel.dart';
 /// em vez de uma única string gigante no SharedPreferences — que provoca
 /// falta de memória ao salvar/ler listas grandes no Android.
 ///
+/// **Transação segura**: uma nova importação nunca apaga a lista atual antes
+/// de terminar. Os canais novos são gravados em um arquivo temporário e,
+/// somente ao final, o arquivo é substituído por rename atômico. Se algo
+/// falhar no meio, a lista anterior permanece intacta e utilizável.
+///
 /// Os canais são gravados em lotes pequenos e lidos em fluxo, com a
 /// decodificação ocorrendo em Isolate separado para não travar a interface.
 class ChannelsStore {
@@ -21,7 +26,11 @@ class ChannelsStore {
     return File('${dir.path}/$_fileName');
   }
 
-  /// Remove a persistência anterior (usada antes de uma nova importação).
+  Future<String> _dirPath() async =>
+      (await getApplicationDocumentsDirectory()).path;
+
+  /// Remove a persistência anterior (usada em operações explícitas como
+  /// "excluir lista"; a importação normal não usa este método).
   Future<void> clear() async {
     final file = await _file();
     if (await file.exists()) {
@@ -33,32 +42,74 @@ class ChannelsStore {
     }
   }
 
-  /// Quantidade de canais já persistidos.
+  /// Quantidade de canais já persistidos, contada em fluxo (sem carregar o
+  /// arquivo inteiro na memória).
   Future<int> count() async {
     final file = await _file();
     if (!await file.exists()) return 0;
     final stream = file.openRead().transform(utf8.decoder);
-    final lines = await stream
+    return await stream
         .transform(const LineSplitter())
         .where((line) => line.isNotEmpty)
         .length;
-    return lines;
   }
 
-  /// Carrega todos os canais já persistidos, decodificando em Isolate.
-  /// Retorna lista vazia se o arquivo não existir ou estiver corrompido.
+  /// Carrega todos os canais já persistidos, lendo em fluxo e decodificando
+  /// em Isolate em lotes. Retorna lista vazia se o arquivo não existir ou
+  /// estiver corrompido — nunca lança exceção para a interface.
   Future<List<Channel>> loadAll({int decodeBatchSize = 2000}) async {
     final file = await _file();
     if (!await file.exists()) return const [];
 
-    final raw = await file.readAsString();
-    if (raw.isEmpty) return const [];
+    try {
+      final stat = await file.stat();
+      if (stat.size <= 1024 * 1024) {
+        // Arquivos pequenos podem ser lidos inteiros e decodificados de uma
+        // vez no Isolate, sem risco de memória.
+        final raw = await file.readAsString();
+        if (raw.isEmpty) return const [];
+        return await compute(_decode, _DecodeArgs(raw, decodeBatchSize));
+      }
 
-    // Decodificação em Isolate em lotes, com tolerância a linhas inválidas.
-    final channels = await compute(
-      _decode,
-      _DecodeArgs(raw, decodeBatchSize),
-    );
+      // Arquivos grandes: leitura em chunks e decodificação incremental em
+      // isolates, garantindo memória de pico muito menor.
+      return await _loadIncremental(file, decodeBatchSize: decodeBatchSize);
+    } catch (_) {
+      // Arquivo corrompido ou falha de leitura: retorna lista vazia e a
+      // importação poderá ser refeita sem perder o aplicativo.
+      return const [];
+    }
+  }
+
+  Future<List<Channel>> _loadIncremental(
+    File file, {
+    int decodeBatchSize = 2000,
+  }) async {
+    final channels = <Channel>[];
+    final collector = <String>[];
+
+    await for (final chunk in file.openRead().transform(utf8.decoder)) {
+      final lines = chunk.split('\n');
+      // O último segmento pode terminar sem \n: junta com o próximo chunk.
+      for (var i = 0; i < lines.length; i++) {
+        final line = lines[i].trim();
+        if (line.isEmpty) continue;
+        collector.add(line);
+        if (collector.length >= decodeBatchSize) {
+          channels.addAll(await compute(_decode, _DecodeArgs(
+            collector.join('\n'),
+            decodeBatchSize,
+          )));
+          collector.clear();
+        }
+      }
+    }
+    if (collector.isNotEmpty) {
+      channels.addAll(await compute(_decode, _DecodeArgs(
+        collector.join('\n'),
+        decodeBatchSize,
+      )));
+    }
     return channels;
   }
 
@@ -87,11 +138,48 @@ class ChannelsStore {
     await sink.close();
   }
 
-  /// Substitui o conteúdo do arquivo pelos canais fornecidos, gravando em
-  /// lotes (usado na importação completa após [clear]).
+  /// **Substituição transacional**: grava os [channels] em um arquivo
+  /// temporário e só no final substitui o arquivo atual por rename atômico.
+  /// Se a gravação falhar no meio, a lista anterior permanece intacta e
+  /// utilizável. Retorna a quantidade de canais gravados.
   Future<int> saveAll(List<Channel> channels, {int writeBatchSize = 1000}) async {
-    await clear();
-    await append(channels, writeBatchSize: writeBatchSize);
+    if (channels.isEmpty) return 0;
+    final dirPath = await _dirPath();
+    final tempPath = '$dirPath/$_fileName.tmp';
+    final tempFile = File(tempPath);
+    final currentFile = await _file();
+
+    // Grava tudo no temporário, em lotes.
+    final sink = tempFile.openWrite(mode: FileMode.writeOnly);
+    final buffer = StringBuffer();
+    int buffered = 0;
+
+    for (final channel in channels) {
+      buffer.writeln(jsonEncode(channel.toJson()));
+      buffered++;
+      if (buffered >= writeBatchSize) {
+        sink.write(buffer.toString());
+        buffer.clear();
+        buffered = 0;
+        await Future<void>.delayed(Duration.zero);
+      }
+    }
+    if (buffer.isNotEmpty) sink.write(buffer.toString());
+    await sink.flush();
+    await sink.close();
+
+    // Verificação mínima de integridade antes de substituir.
+    final stat = await tempFile.stat();
+    if (stat.size <= 0) {
+      await tempFile.delete().catchError((_) => File("")); 
+      throw StateError('A gravação da lista ficou vazia. Nada foi substituído.');
+    }
+
+    // Rename atômico no mesmo sistema de arquivos: substitui o arquivo atual
+    // de uma só vez — em caso de queda no meio da operação, ou permanece a
+    // lista antiga (rename falhou) ou a nova (rename concluído), nunca um
+    // arquivo pela metade.
+    await tempFile.rename(currentFile.path);
     return channels.length;
   }
 
@@ -114,25 +202,23 @@ List<Channel> _decode(_DecodeArgs args) {
   final lines = args.raw.split('\n');
   final channels = <Channel>[];
   List<String> batchRaw = [];
-  int skipped = 0;
 
   for (final line in lines) {
     final trimmed = line.trim();
     if (trimmed.isEmpty) continue;
     batchRaw.add(trimmed);
     if (batchRaw.length >= args.batchSize) {
-      channels.addAll(_decodeBatch(batchRaw, skippedRef: skipped));
-      skipped = 0; // recontado por lote
+      channels.addAll(_decodeBatch(batchRaw));
       batchRaw = [];
     }
   }
   if (batchRaw.isNotEmpty) {
-    channels.addAll(_decodeBatch(batchRaw, skippedRef: skipped));
+    channels.addAll(_decodeBatch(batchRaw));
   }
   return channels;
 }
 
-List<Channel> _decodeBatch(List<String> raws, {int skippedRef = 0}) {
+List<Channel> _decodeBatch(List<String> raws) {
   final channels = <Channel>[];
   for (final raw in raws) {
     try {

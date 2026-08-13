@@ -28,6 +28,6 @@ class EpgService {
   }
   List<Channel> apply(List<Channel> channels, Map<String, ({String title, DateTime start, DateTime end})> programmes) => channels.map((c) {
     final p = c.tvgId == null ? null : programmes[c.tvgId];
-    return p == null ? c : c.copyWith(epgTitle: p.title, epgStart: p.start, epgEnd: p.end);
+    return p == null ? c : c.copyWithEpg(epgTitle: p.title, epgStart: p.start, epgEnd: p.end);
   }).toList();
 }
