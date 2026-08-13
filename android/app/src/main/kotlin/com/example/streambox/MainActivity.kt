@@ -9,12 +9,19 @@ class MainActivity : FlutterActivity() {
     // enquanto uma TV estiver reproduzindo; 'stop' encerra o service quando
     // não há mais nenhuma sessão ativa.
     private val relayChannel: MethodChannel by lazy {
-        MethodChannel(binaryMessenger, "relay_service").apply {
+        MethodChannel(
+            requireNotNull(flutterEngine).dartExecutor.binaryMessenger,
+            "relay_service",
+        ).apply {
             setMethodCallHandler { call, result ->
                 when (call.method) {
                     "start" -> {
-                        val channelName = call.argument<String>("channel_name")
-                        StreamBoxRelayService.start(this@MainActivity, channelName)
+                        val channelName =
+                            call.argument<String>("channel_name")
+                        StreamBoxRelayService.start(
+                            this@MainActivity,
+                            channelName,
+                        )
                         result.success(null)
                     }
                     "stop" -> {
@@ -25,5 +32,12 @@ class MainActivity : FlutterActivity() {
                 }
             }
         }
+    }
+
+    override fun configureFlutterEngine(flutterEngine: io.flutter.embedding.engine.FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+        // Registra o canal quando o engine é criado — assim o channel existe
+        // mesmo antes de qualquer chamada do Dart.
+        relayChannel
     }
 }
