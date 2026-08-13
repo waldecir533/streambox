@@ -49,7 +49,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       } else {
         _startMedia3();
       }
-    }, onError: (_) => _startMedia3());
+    }, onError: (_) { _startMedia3(); return null; });
   }
 
   Future<String> _loadEnginePreference() async {
