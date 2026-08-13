@@ -18,8 +18,6 @@
 
 import 'package:flutter/material.dart';
 
-import '../models/channel.dart';
-
 enum LibrarySection {
   live('TV ao vivo', Icons.live_tv, 'TV ao vivo',
       'Canais transmitidos em tempo real, organizados por tema.'),

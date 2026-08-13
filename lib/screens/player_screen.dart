@@ -4,6 +4,7 @@ import 'package:flutter_vlc_player/flutter_vlc_player.dart';
 import 'package:video_player/video_player.dart';
 
 import '../models/channel.dart';
+import '../services/preferences_service.dart';
 import '../widgets/cast_dialog.dart';
 
 enum PlayerEngine { automatic, media3, libvlc }
@@ -33,13 +34,30 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _loading = true;
   bool _playing = false;
   bool _fullscreen = false;
+  PreferencesService get _prefs => PreferencesService();
   String? _error;
   double _speed = 1;
 
   @override
   void initState() {
     super.initState();
-    _startMedia3();
+    // Preferência do usuário em Configurações (automatic, media3 ou libvlc).
+    // Falha ao ler não bloqueia a reprodução: usa o automático.
+    _loadEnginePreference().then((engine) {
+      if (engine == 'libvlc' || engine == 'vlc') {
+        _startVlc();
+      } else {
+        _startMedia3();
+      }
+    }, onError: (_) => _startMedia3());
+  }
+
+  Future<String> _loadEnginePreference() async {
+    try {
+      return await _prefs.playerEnginePreference();
+    } catch (_) {
+      return 'automatic';
+    }
   }
 
   Future<void> _startMedia3() async {
@@ -179,16 +197,29 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Future<void> _toggleFullscreen() async {
     _fullscreen = !_fullscreen;
     if (_fullscreen) {
-      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-      await SystemChrome.setPreferredOrientations([
-        DeviceOrientation.landscapeLeft,
-        DeviceOrientation.landscapeRight,
-      ]);
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+      final rotate = await _shouldRotateLandscape();
+      if (rotate) {
+        SystemChrome.setPreferredOrientations([
+          DeviceOrientation.landscapeLeft,
+          DeviceOrientation.landscapeRight,
+        ]);
+      }
     } else {
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
       await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
     }
     if (mounted) setState(() {});
+  }
+
+  /// Gira para paisagem na tela cheia somente se o usuário permitiu em
+  /// Configurações.
+  Future<bool> _shouldRotateLandscape() async {
+    try {
+      return await _prefs.fullscreenLandscape();
+    } catch (_) {
+      return true;
+    }
   }
 
   double get _aspectRatio {
