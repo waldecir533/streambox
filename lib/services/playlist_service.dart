@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
-import 'package:flutter/foundation.dart';
 import 'dart:io';
+
+import 'package:flutter/foundation.dart';
 
 import 'package:http/http.dart' as http;
 
 import '../models/channel.dart';
+import 'diagnostic_service.dart';
 import 'm3u_parser.dart';
 
 /// Resultado de uma tentativa de importação: os canais validados ou o tipo
@@ -62,6 +64,34 @@ String _statusMessage(int code) {
       }
       return 'O servidor respondeu com código HTTP $code.';
   }
+}
+
+/// Classifica o erro de rede em uma categoria curta para o relatório de
+/// diagnóstico (sem credenciais ou dados sensíveis).
+String _networkErrorClass(dynamic error) {
+  final text = error.toString().toLowerCase();
+  if (text.contains('socket exception') && text.contains('os error 111')) {
+    return 'conexão recusada';
+  }
+  if (text.contains('socket exception') &&
+      (text.contains('os error 110') || text.contains('os error 101') ||
+          text.contains('timed out'))) {
+    return 'tempo de conexão esgotado';
+  }
+  if (text.contains('socket')) return 'falha de socket';
+  if (text.contains('connection refused')) return 'conexão recusada';
+  if (text.contains('failed host lookup') || text.contains('no address')) {
+    return 'DNS não resolveu';
+  }
+  if (text.contains('handshake') || text.contains('certificate') ||
+      text.contains('ssl') || text.contains('tls')) {
+    return 'erro de SSL/TLS';
+  }
+  if (text.contains('httpexception') || text.contains('closed before')) {
+    return 'servidor fechou a conexão';
+  }
+  if (text.contains('timeout')) return 'timeout';
+  return 'erro de rede (${error.runtimeType})';
 }
 
 /// Mensagem para falhas de rede (DNS, SSL, conexão).
@@ -160,12 +190,15 @@ class PlaylistService {
         'User-Agent': 'VLC/3.0.20 LibVLC/3.0.20',
       }).timeout(timeout);
     } on TimeoutException {
+      DiagnosticService.importDiagnostic.networkError = 'timeout';
       return ImportResult(
         sourceType: SourceType.unknown,
         message: 'A conexão com o servidor da lista demorou mais que o '
             'esperado. Verifique a internet e tente novamente.',
       );
     } catch (error) {
+      DiagnosticService.importDiagnostic.networkError =
+          _networkErrorClass(error);
       return ImportResult(
         sourceType: SourceType.unknown,
         message: _networkMessage(error),
@@ -182,6 +215,9 @@ class PlaylistService {
     );
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
+      DiagnosticService.importDiagnostic.httpStatusCode = response.statusCode;
+      DiagnosticService.importDiagnostic.networkError =
+          'HTTP ${response.statusCode}';
       return ImportResult(
         statusCode: response.statusCode,
         sourceType: SourceType.unknown,

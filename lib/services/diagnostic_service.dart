@@ -61,7 +61,7 @@ class DiagnosticService {
     } catch (_) {
       sb.writeln('Versão Android: indisponível');
     }
-    sb.writeln('Versão do StreamBox: 0.7.4');
+    sb.writeln('Versão do StreamBox: 0.7.5');
 
     // Memória aproximada em uso.
     try {
@@ -81,6 +81,12 @@ class DiagnosticService {
     sb.writeln('Canais salvos: ${diag.savedCount}');
     sb.writeln('Linhas ignoradas (inválidas): ${diag.skippedLines}');
     sb.writeln('Fonte detectada: ${diag.detectedSource}');
+    if (diag.httpStatusCode != null) {
+      sb.writeln('Código HTTP: ${diag.httpStatusCode}');
+    }
+    if (diag.networkError != null) {
+      sb.writeln('Erro de rede: ${sanitize(diag.networkError!)}');
+    }
     if (diag.importTimeSeconds != null) {
       sb.writeln('Duração da importação: ${diag.importTimeSeconds!.toStringAsFixed(1)} s');
     }
@@ -175,6 +181,15 @@ class ImportDiagnostic {
   String? failurePhase;
   String? errorMessage;
   String? stackTrace;
+
+  /// Código HTTP devolvido pelo servidor da lista (200, 404, 403...).
+  /// Null quando a falha ocorreu antes de chegar ao servidor (DNS, SSL,
+  /// timeout, conexão).
+  int? httpStatusCode;
+
+  /// Descrição curta e sanitizada do erro de rede (ex.: 'timeout',
+  /// 'conexão recusada', 'SSL handshake'), para diagnóstico remoto.
+  String? networkError;
 
   /// Tipo de fonte detectado pela inspeção (playlist, HLS, HTML, JSON...).
   String detectedSource = 'não detectado';
