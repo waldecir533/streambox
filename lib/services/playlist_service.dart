@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'dart:io';
 
@@ -499,13 +500,17 @@ class _RawHttpGet {
   }
 
   static _RawHttpGet parse(List<List<int>> chunks) {
-    String raw = String.fromCharCodes(
-      chunks.expand((chunk) => chunk).toList(),
-    );
+    final rawBytes = <int>[];
+    for (final chunk in chunks) {
+      rawBytes.addAll(chunk);
+    }
     // O servidor pode responder com Transfer-Encoding: chunked (sem
-    // Content-Length). Decodificamos os blocos manualmente.
-    final headerEnd = raw.indexOf('\r\n\r\n');
-    final headerBlock = headerEnd >= 0 ? raw.substring(0, headerEnd) : raw;
+    // Content-Length). Decodificamos os blocos manualmente — em bytes,
+    // para não perder dados ao converter String antes da descompressão.
+    final headerEnd = _indexOf(rawBytes, _crlfCrlf); // início 0
+    final headerBlock = headerEnd >= 0
+        ? String.fromCharCodes(rawBytes.sublist(0, headerEnd))
+        : String.fromCharCodes(rawBytes);
     final transferEncoding = headerBlock
         .split('\r\n')
         .firstWhere(
@@ -513,11 +518,39 @@ class _RawHttpGet {
           orElse: () => '',
         );
     final isChunked = transferEncoding.toLowerCase().contains('chunked');
-    final body = isChunked
-        ? _decodeChunked(headerEnd >= 0 ? raw.substring(headerEnd + 4) : raw)
-        : (headerEnd >= 0 ? raw.substring(headerEnd + 4) : '');
-    if (isChunked) {
-      raw = '$headerBlock\r\n\r\n$body';
+    List<int> bodyBytes = isChunked
+        ? _decodeChunkedBytes(headerEnd >= 0
+            ? rawBytes.sublist(headerEnd + 4)
+            : rawBytes)
+        : (headerEnd >= 0 ? rawBytes.sublist(headerEnd + 4) : <int>[]);
+
+    // Conteúdo compactado (gzip/deflate): muitos provedores IPTV devolvem a
+    // lista comprimida mesmo quando o app não pediu — sem decodificar, os
+    // bytes crus não parecem playlist e a importação falha silenciosamente.
+    final contentEncoding = headerBlock
+        .split('\r\n')
+        .firstWhere(
+          (line) => line.toLowerCase().startsWith('content-encoding'),
+          orElse: () => '',
+        )
+        .split(':')
+        .last
+        .trim()
+        .toLowerCase();
+    if (contentEncoding == 'gzip' || contentEncoding == 'x-gzip') {
+      try {
+        bodyBytes = GZipCodec().decode(bodyBytes);
+      } catch (_) {
+        // Falha na descompressão: mantém o corpo original e segue.
+      }
+    } else if (contentEncoding == 'deflate') {
+      try {
+        bodyBytes = ZLibCodec().decode(bodyBytes);
+      } catch (_) {
+        try {
+          bodyBytes = ZLibCodec(raw: true).decode(bodyBytes);
+        } catch (_) {}
+      }
     }
 
     final firstLineEnd = headerBlock.indexOf('\r\n');
@@ -540,27 +573,55 @@ class _RawHttpGet {
         }
       }
     }
-    return _RawHttpGet(status, responseHeaders, body.codeUnits);
+        return _RawHttpGet(status, responseHeaders, bodyBytes);
+  }
+
+  /// Marca do fim dos cabeçalhos HTTP (CRLF duplo) em bytes.
+  static final List<int> _crlfCrlf = utf8.encode('\r\n\r\n');
+
+  /// Busca uma sequência de bytes dentro de outra (para achar o CRLF duplo
+  /// em bytes brutos, sem converter para String antes).
+  static int _indexOf(List<int> haystack, List<int> needle, {int start = 0}) {
+    if (needle.isEmpty) return start;
+    for (var i = start; i <= haystack.length - needle.length; i++) {
+      var match = true;
+      for (var j = 0; j < needle.length; j++) {
+        if (haystack[i + j] != needle[j]) {
+          match = false;
+          break;
+        }
+      }
+      if (match) return i;
+    }
+    return -1;
   }
 
   /// Remove a codificação chunked de HTTP/1.1 (tamanho em hexa + CRLF +
-  /// dados, encerrado por '0\r\n').
-  static String _decodeChunked(String raw) {
-    final buffer = StringBuffer();
+  /// dados, encerrado por '0\r\n'). Opera em bytes brutos para não perder
+  /// dados de conteúdo binário (gzip, por exemplo) ao converter para String.
+  static List<int> _decodeChunkedBytes(List<int> raw) {
+    final buffer = <int>[];
     var cursor = 0;
     while (cursor < raw.length) {
-      final lineEnd = raw.indexOf('\r\n', cursor);
+      final lineEnd = _indexOf(raw, _crlf, start: cursor);
       if (lineEnd < 0) break;
-      final size = int.tryParse(
-        raw.substring(cursor, lineEnd).trim().split(';').first.trim(),
-        radix: 16,
-      );
+      final sizeText =
+          String.fromCharCodes(raw.sublist(cursor, lineEnd))
+              .trim()
+              .split(';')
+              .first
+              .trim();
+      final size = int.tryParse(sizeText, radix: 16);
       if (size == null || size == 0) break;
       cursor = lineEnd + 2;
       if (cursor + size > raw.length) break;
-      buffer.write(raw.substring(cursor, cursor + size));
+      buffer.addAll(raw.sublist(cursor, cursor + size));
       cursor += size + 2;
     }
-    return buffer.toString();
+    return buffer;
   }
+
+  /// CRLF em bytes.
+  static final List<int> _crlf = utf8.encode('\r\n');
+
 }

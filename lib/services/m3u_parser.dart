@@ -161,8 +161,18 @@ class M3uParser {
   /// em caso de falha, usa latin-1 (nunca falha) removendo caracteres de
   /// controle estranhos à lista.
   static String decodeText(List<int> bytes) {
+    // BOM (U+FEFF) é comum no início de listas M3U de provedores que usam
+    // ferramentas Windows/UTF-16; removê-lo antes da análise, senão o
+    // '#EXTM3U' nunca é reconhecido e a lista é rejeitada como desconhecida.
+    List<int> body = bytes;
+    if (body.length >= 3 &&
+        body[0] == 0xEF &&
+        body[1] == 0xBB &&
+        body[2] == 0xBF) {
+      body = body.sublist(3);
+    }
     try {
-      return utf8.decode(bytes, allowMalformed: false);
+      return utf8.decode(body, allowMalformed: false);
     } catch (_) {
       // latin1 nunca falha; remove NUL e caracteres de controle não úteis.
       final latin1 = String.fromCharCodes(bytes);
