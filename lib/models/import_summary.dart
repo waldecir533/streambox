@@ -1,4 +1,5 @@
 import '../models/channel.dart';
+import '../services/library_section_service.dart';
 
 /// Resumo estatístico de uma importação, usado no diálogo de conclusão
 /// ("Ver detalhes"). Identifica seções por palavras-chave em `group-title`
@@ -10,6 +11,7 @@ class ImportSummary {
     required this.movies,
     required this.series,
     required this.sports,
+    required this.liveChannels,
     required this.groups,
     required this.skippedLines,
     required this.bytes,
@@ -20,6 +22,7 @@ class ImportSummary {
   final int movies;
   final int series;
   final int sports;
+  final int liveChannels;
   final int groups;
   final int skippedLines;
   final int bytes;
@@ -36,17 +39,20 @@ class ImportSummary {
     required double durationSeconds,
   }) {
     final groups = <String>{};
-    int movies = 0, series = 0, sports = 0;
+    int movies = 0, series = 0, sports = 0, liveChannels = 0;
     for (final channel in channels) {
       final g = channel.group ?? '';
       if (g.isNotEmpty) groups.add(g);
-      final lower = g.toLowerCase();
-      if (_movieKeywords.any(lower.contains)) {
-        movies++;
-      } else if (_seriesKeywords.any(lower.contains)) {
-        series++;
-      } else if (_sportsKeywords.any(lower.contains)) {
-        sports++;
+      switch (LibrarySectionService.sectionOf(channel.group)) {
+        case LibrarySection.movies:
+          movies++;
+        case LibrarySection.series:
+          series++;
+        case LibrarySection.sports:
+          sports++;
+        case LibrarySection.live:
+        case LibrarySection.others:
+          liveChannels++;
       }
     }
     return ImportSummary(
@@ -54,24 +60,13 @@ class ImportSummary {
       movies: movies,
       series: series,
       sports: sports,
+      liveChannels: liveChannels,
       groups: groups.length,
       skippedLines: skippedLines,
       bytes: bytes,
       durationSeconds: durationSeconds,
     );
   }
-
-  static const _movieKeywords = [
-    'filme', 'filmes', 'movie', 'movies', 'cinema', 'lançamento', 'lancamento',
-  ];
-  static const _seriesKeywords = [
-    'série', 'series', 'séries', 'seriados', 'novela', 'novelas', 'episódios',
-    'episodios',
-  ];
-  static const _sportsKeywords = [
-    'esporte', 'esportes', 'sport', 'sports', 'futebol', 'nfl', 'ufc',
-    'basquete', 'tennis', 'tênis',
-  ];
 
   String get durationDescription {
     final seconds = durationSeconds.round();

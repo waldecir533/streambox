@@ -5,6 +5,7 @@ import '../models/channel.dart';
 import '../models/import_summary.dart';
 import '../services/diagnostic_service.dart';
 import '../services/epg_service.dart';
+import '../services/library_section_service.dart';
 import '../services/m3u_parser.dart';
 import '../services/playlist_service.dart';
 import '../services/preferences_service.dart';
@@ -35,6 +36,7 @@ class _HomeScreenState extends State<HomeScreen> {
   int? _skippedLines;
   LibraryView _view = LibraryView.channels;
   List<String> _memoGroups = const [];
+  LibrarySection? _section;
 
   @override void initState() { super.initState(); _restore(); }
   Future<void> _restore() async {
@@ -53,6 +55,16 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  /// Contagem de canais por seção do padrão brasileiro (para a barra de seções).
+  Map<LibrarySection, int> get _sectionCounts {
+    final counts = <LibrarySection, int>{for (final s in LibrarySection.values) s: 0};
+    for (final channel in _channels) {
+      counts[LibrarySectionService.sectionOf(channel.group)] =
+          (counts[LibrarySectionService.sectionOf(channel.group)] ?? 0) + 1;
+    }
+    return counts;
+  }
+
   List<String> _computeGroups() => (_channels
       .map((c) => c.group)
       .whereType<String>()
@@ -65,6 +77,11 @@ class _HomeScreenState extends State<HomeScreen> {
     Iterable<Channel> result = _channels;
     if (_view == LibraryView.favorites) result = result.where((c) => _favorites.contains(c.id));
     if (_view == LibraryView.history) { final byId = {for (final c in result) c.id: c}; result = _history.map((id) => byId[id]).whereType<Channel>(); }
+    // Filtra por seção do padrão brasileiro (TV ao vivo, Filmes, Séries,
+    // Esportes) sem alterar o group-title original de nenhum canal.
+    if (_section != null && _view == LibraryView.channels) {
+      result = result.where((c) => LibrarySectionService.sectionOf(c.group) == _section);
+    }
     if (_group != null && _view == LibraryView.channels) result = result.where((c) => c.group == _group);
     final q = _search.text.trim().toLowerCase();
     if (q.isNotEmpty) result = result.where((c) => c.name.toLowerCase().contains(q) || (c.group ?? '').toLowerCase().contains(q));
@@ -227,10 +244,11 @@ class _HomeScreenState extends State<HomeScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text('• ${summary.channels} canais importados'),
-            Text('• ${summary.groups} categorias organizadas'),
+            Text('• ${summary.liveChannels} canais de TV ao vivo'),
             Text('• ${summary.movies} filmes identificados'),
             Text('• ${summary.series} séries identificadas'),
             Text('• ${summary.sports} conteúdos de esportes'),
+            Text('• ${summary.groups} categorias organizadas'),
             if (summary.skippedLines > 0)
               Text('• ${summary.skippedLines} entradas ignoradas por estarem inválidas'),
             Text('• Tamanho da lista: ${summary.sizeDescription}'),
@@ -251,10 +269,11 @@ class _HomeScreenState extends State<HomeScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text('Canais importados: ${summary.channels}'),
-                      Text('Categorias: ${summary.groups}'),
+                      Text('TV ao vivo: ${summary.liveChannels}'),
                       Text('Filmes identificados: ${summary.movies}'),
                       Text('Séries identificadas: ${summary.series}'),
                       Text('Esportes: ${summary.sports}'),
+                      Text('Categorias: ${summary.groups}'),
                       Text('Entradas ignoradas: ${summary.skippedLines}'),
                       Text('Tamanho: ${summary.sizeDescription}'),
                       Text('Duração: ${summary.durationDescription}'),
@@ -347,7 +366,9 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ]),
       if (_error != null) Padding(padding: const EdgeInsets.all(12), child: Row(children: [Expanded(child: Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error))), if (_retryPlaylistUrl != null) TextButton.icon(onPressed: _loading ? null : () => _loadM3u(_retryPlaylistUrl!), icon: const Icon(Icons.refresh), label: const Text('Tentar novamente'))])),
-      if (_view == LibraryView.channels && _memoGroups.isNotEmpty) SizedBox(height: 52, child: ListView(scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 12), children: [FilterChip(label: const Text('Todos'), selected: _group == null, onSelected: (_) => setState(() => _group = null)), const SizedBox(width: 8), ..._memoGroups.map<Widget>((g) => Padding(padding: const EdgeInsets.only(right: 8), child: FilterChip(label: Text(g), selected: _group == g, onSelected: (_) => setState(() => _group = g))))])),
+      if (_view == LibraryView.channels && _channels.isNotEmpty)
+        SizedBox(height: 44, child: ListView(scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 12), children: [ChoiceChip(label: const Text('Todos'), selected: _section == null, onSelected: (_) => setState(() { _section = null; _group = null; })), ...LibrarySection.values.where((s) => (_sectionCounts[s] ?? 0) > 0).map<Widget>((s) => Padding(padding: const EdgeInsets.only(left: 8), child: ChoiceChip(label: Text('${s.label} (${_sectionCounts[s]})'), avatar: Icon(s.icon, size: 16), selected: _section == s, onSelected: (_) => setState(() { _section = _section == s ? null : s; _group = null; }))))])),
+      if (_view == LibraryView.channels && _memoGroups.isNotEmpty) SizedBox(height: 52, child: ListView(scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 12), children: [FilterChip(label: const Text('Todos'), selected: _group == null, onSelected: (_) => setState(() { _group = null; _section = null; })), const SizedBox(width: 8), ..._memoGroups.map<Widget>((g) => Padding(padding: const EdgeInsets.only(right: 8), child: FilterChip(label: Text(g), selected: _group == g, onSelected: (_) => setState(() { _group = _group == g ? null : g; }))))])),
       Expanded(child: _channels.isEmpty ? _Welcome(onAdd: _accessDialog) : _visible.isEmpty ? const Center(child: Text('Nenhum canal encontrado.')) : ListView.builder(key: ValueKey('${_view.index}-${_group ?? ""}-${_search.text}'), itemCount: _visible.length, itemBuilder: (context, index) { final c = _visible[index]; return ListTile(leading: _Logo(c.logoUrl), title: Text(c.name), subtitle: Text(c.epgTitle ?? c.group ?? 'Ao vivo', maxLines: 1, overflow: TextOverflow.ellipsis), trailing: IconButton(tooltip: 'Favorito', onPressed: () => _favorite(c), icon: Icon(_favorites.contains(c.id) ? Icons.star : Icons.star_border, color: _favorites.contains(c.id) ? Colors.amber : null)), onTap: () => _open(c)); }))
     ])));
 }
