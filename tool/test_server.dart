@@ -101,7 +101,7 @@ void main() async {
     }
   });
 
-  print('Servidor de teste ouvindo em http://127.0.0.1:8099');
+  stdout.writeln('Servidor de teste ouvindo em http://127.0.0.1:8099');
   // Manter vivo até interrupção.
   await Future<void>.delayed(const Duration(days: 1));
 }

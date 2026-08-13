@@ -11,6 +11,11 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 
+// Loga no stdout (o analisador não recomenda print em código de produção).
+void _log(Object? message) {
+  stdout.writeln(message);
+}
+
 // ---------------------------------------------------------------------------
 // Espelho de models/channel.dart (sem flutter)
 // ---------------------------------------------------------------------------
@@ -198,7 +203,7 @@ class M3uParser {
               line.startsWith('rtmp://') ||
               line.startsWith('rtsp://') ||
               line.startsWith('mms://'))) {
-        final parsed = _parseExtInf(pendingInfo!);
+        final parsed = _parseExtInf(pendingInfo);
         if (parsed == null) {
           pendingInfo = null;
           skipped++;
@@ -477,12 +482,12 @@ Future<void> main(List<String> args) async {
       report.writeln('STACK (sanitizado):\n${sanitize('$st')}');
     }
     File('tool/crash_report.txt').writeAsStringSync(report.toString());
-    print(report);
+    _log(report);
     exit(0);
   }
 
   if (url.isEmpty) {
-    print('Uso: dart run tool/crash_reproducer.dart --url <URL> [--restore-only]');
+    _log('Uso: dart run tool/crash_reproducer.dart --url <URL> [--restore-only]');
     exit(64);
   }
 
@@ -525,6 +530,6 @@ Future<void> main(List<String> args) async {
   }
 
   File('tool/crash_report.txt').writeAsStringSync(report.toString());
-  print(report);
+  _log(report);
   exit(0);
 }
