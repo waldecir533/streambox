@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'dart:io';
 
 import 'package:http/http.dart' as http;
@@ -130,6 +131,18 @@ class PlaylistService {
       );
     }
 
+    // URLs .onion só resolvem dentro da rede Tor; por fora, o DNS falha
+    // silenciosamente e a lista "não carrega". Informe o usuário em vez de
+    // deixá-lo pensar que é um defeito do app ou da internet.
+    if (uri.host.endsWith('.onion')) {
+      return const ImportResult(
+        sourceType: SourceType.unknown,
+        message: 'Essa URL é da rede Tor (.onion) e só funciona dentro dela. '
+            'Use uma URL normal (http:// ou https://) para a lista — o '
+            'StreamBox não usa a rede Tor.',
+      );
+    }
+
     final List<int> bodyBytes;
     final http.Response response;
     try {
@@ -154,6 +167,15 @@ class PlaylistService {
         message: _networkMessage(error),
       );
     }
+
+    // Log temporário de diagnóstico: status HTTP e início do conteúdo
+    // devolvido, para identificar provedores que respondem com página de
+    // erro/HTML em vez da lista (sem registrar credenciais ou URL completa).
+    debugPrint(
+      '[StreamBox] Resposta da lista: HTTP ${response.statusCode} '
+      '${response.contentLength} bytes | início: '
+      '${_preview(response.bodyBytes)}',
+    );
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
       return ImportResult(
@@ -326,6 +348,18 @@ class PlaylistService {
       // 303 converte qualquer método em GET; 301/302 mantêm headers.
       uri = next;
       remaining--;
+    }
+  }
+
+  /// Início do conteúdo devolvido pelo servidor (até 500 caracteres),
+  /// para o log temporário de diagnóstico — identifica respostas HTML/JSON
+  /// de erro em vez da lista, sem registrar credenciais ou URL completa.
+  static String _preview(List<int> bytes) {
+    try {
+      final text = M3uParser.decodeText(bytes.take(500).toList()).trim();
+      return text.isEmpty ? '(vazio)' : text;
+    } catch (_) {
+      return '(conteúdo não decodificável)';
     }
   }
 

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../models/channel.dart';
+import 'recording_service.dart';
 
 /// Servidor HTTP local que retransmite vídeos (M3U, HLS e arquivos da
 /// galeria) para Smart TVs via DLNA/UPnP.
@@ -19,6 +20,7 @@ class StreamProxyService {
   HttpServer? _server;
   String? _host;
   final Map<String, _TokenEntry> _entries = {};
+  final Map<String, _RecordingEntry> _recordings = {};
 
   Future<Uri> urlFor(Channel channel) async {
     await _ensureStarted();
@@ -40,30 +42,81 @@ class StreamProxyService {
 
   bool get isRunning => _server != null;
 
-  /// Testa se a URL anunciada é realmente alcançável pela rede — exatamente
-  /// o que a TV fará ao tentar baixar a mídia. Se falhar, o problema é
-  /// rede/endereço (TV em outra rede, Wi-Fi Direct, VPN, firewall do
-  /// Android) e não o formato do vídeo.
+  /// Registro opcional de uma gravação (DVR) atrelada a uma URL de canal:
+  /// os bytes do upstream que passam pelo proxy são escritos no arquivo da
+  /// gravação, sem ocupar memória.
+  void startRecording(String channelUrl, Recording recording) {
+    final token = base64Url.encode(utf8.encode(channelUrl)).replaceAll('=', '');
+    final entry = _entries[token];
+    if (entry == null) return;
+    entry.recording = recording;
+    recording.finished.then((_) => entry.recording = null);
+  }
+
+  /// Encerra a gravação atrelada a uma URL de canal, se existir.
+  Future<void> stopRecording(String channelUrl) async {
+    final token = base64Url.encode(utf8.encode(channelUrl)).replaceAll('=', '');
+    final entry = _entries[token];
+    await entry?.recording?.stop();
+  }
+
+  /// URL local que serve o arquivo da gravação enquanto ela ocorre:
+  /// o player abre esta URL e assiste em tempo real conforme os bytes
+  /// chegam ao disco (GET/HEAD com Content-Length e Range/206).
+  Uri recordingUrl(Recording recording) {
+    final token = base64Url.encode(utf8.encode(recording.id)).replaceAll('=', '');
+    _recordings[token] = _RecordingEntry(recording);
+    return Uri(
+      scheme: 'http',
+      host: _host,
+      port: _server!.port,
+      pathSegments: ['streamplay', token],
+    );
+  }
+
+  /// Testa se o servidor local está realmente alcançável pela rede —
+  /// exatamente o que a TV fará ao tentar baixar a mídia. Testa SOMENTE o
+  /// servidor do celular (não depende do upstream do canal): qualquer
+  /// resposta HTTP real (200, 404, 500...) significa que a TV consegue
+  /// chegar até aqui; problemas de reprodução do conteúdo são outra fase.
   Future<bool> testUrl(Uri announcedUrl) async {
-    final client = HttpClient();
-    try {
-      final request = await client
-          .openUrl('GET', announcedUrl)
-          .timeout(const Duration(seconds: 5));
-      request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-1023');
-      final response = await request.close().timeout(const Duration(seconds: 8));
-      if (response.statusCode == HttpStatus.partialContent ||
-          response.statusCode == HttpStatus.ok) {
+    return testLocalServer(
+      Uri(scheme: 'http', host: announcedUrl.host, port: announcedUrl.port),
+    );
+  }
+
+  /// Verifica o servidor local em si, sem depender do upstream do canal.
+  /// Com retry: o Android às vezes recusa a primeira conexão logo após o
+  /// bind da porta dinâmica.
+  Future<bool> testLocalServer(Uri baseUrl, {int attempts = 3}) async {
+    for (int attempt = 0; attempt < attempts; attempt++) {
+      final client = HttpClient();
+      try {
+        final request = await client
+            .openUrl('GET', baseUrl)
+            .timeout(const Duration(seconds: 5));
+        request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-1023');
+        final response = await request.close().timeout(const Duration(seconds: 8));
+        // Servidor vivo: qualquer código HTTP real (o path inválido devolve
+        // 404; com upstream lento/indisponível pode chegar 500). Só falha de
+        // rede/timeout/firewall devolve exceção.
+        final alive = response.statusCode > 0;
         await response.drain<void>();
-        return true;
+        if (alive) return true;
+        if (attempt < attempts - 1) {
+          await Future<void>.delayed(const Duration(milliseconds: 700));
+        }
+      } catch (_) {
+        if (attempt < attempts - 1) {
+          await Future<void>.delayed(const Duration(milliseconds: 700));
+          continue;
+        }
+        return false;
+      } finally {
+        client.close(force: true);
       }
-      await response.drain<void>();
-      return false;
-    } catch (_) {
-      return false;
-    } finally {
-      client.close(force: true);
     }
+    return false;
   }
 
   Future<void> _ensureStarted() async {
@@ -128,10 +181,22 @@ class StreamProxyService {
 
   Future<void> _handle(HttpRequest request) async {
     try {
-      if (request.uri.pathSegments.length != 2 ||
-          request.uri.pathSegments.first != 'stream') {
+      if (request.uri.pathSegments.length != 2) {
         request.response.statusCode = HttpStatus.notFound;
         await request.response.close();
+        return;
+      }
+      // /streamrec/<token>: controle da gravação em andamento (DVR).
+      // GET  = JSON de status da gravação (bytes, segundos, running).
+      // POST = encerra a gravação (stop).
+      if (request.uri.pathSegments.first == 'streamrec') {
+        await _handleRecording(request, request.uri.pathSegments[1]);
+        return;
+      }
+      // /streamplay/<token>: serve o arquivo de gravação em andamento
+      // (Content-Length atual, Range/206) para o player acompanhar.
+      if (request.uri.pathSegments.first == 'streamplay') {
+        await _handleStreamPlay(request, request.uri.pathSegments[1]);
         return;
       }
       final token = request.uri.pathSegments[1];
@@ -173,9 +238,65 @@ class StreamProxyService {
         request.response.statusCode = HttpStatus.internalServerError;
         await request.response.close();
       } catch (_) {}
-      // Falhas de servidor nunca chegam à TV como exceção silenciosa;
-      // ela vê 500 real, útil para diagnóstico.
     }
+  }
+
+  /// Atende o arquivo de gravação em andamento (`/streamplay/token`):
+  /// Content-Length atual, Accept-Ranges e Range/206 para o player
+  /// acompanhar em tempo real o que já está no disco.
+  Future<void> _handleStreamPlay(HttpRequest request, String token) async {
+    final entry = _recordings[token];
+    final recording = entry?.recording;
+    final response = request.response;
+    if (recording == null) {
+      response.statusCode = HttpStatus.notFound;
+      await response.close();
+      return;
+    }
+    final file = recording.file;
+    if (!await file.exists()) {
+      response.statusCode = HttpStatus.notFound;
+      await response.close();
+      return;
+    }
+    final length = await file.length();
+    response.headers.contentType = ContentType('video', 'mp2t');
+    response.headers.set('Accept-Ranges', 'bytes');
+
+    if (request.method == 'HEAD') {
+      response.contentLength = length;
+      await response.close();
+      return;
+    }
+    final rangeHeader = request.headers.value(HttpHeaders.rangeHeader);
+    if (rangeHeader != null && length > 0) {
+      final match = RegExp(r'bytes=(\d*)-(\d*)').firstMatch(rangeHeader);
+      if (match != null) {
+        final start = int.tryParse(match.group(1) ?? '') ?? 0;
+        final end = int.tryParse(match.group(2) ?? '') ?? length - 1;
+        final from = start.clamp(0, length - 1);
+        final to = end.clamp(from, length - 1);
+        final handle = await file.open(mode: FileMode.read);
+        try {
+          await handle.setPosition(from);
+          final bytes = await handle.read((to - from + 1).clamp(0, 64 * 1024));
+          response.statusCode = HttpStatus.partialContent;
+          response.headers.set(
+            'Content-Range',
+            'bytes $from-$to/$length',
+          );
+          response.contentLength = bytes.length;
+          response.add(bytes);
+        } finally {
+          await handle.close();
+        }
+        await response.close();
+        return;
+      }
+    }
+    response.contentLength = length;
+    await response.addStream(file.openRead());
+    await response.close();
   }
 
   /// Atende um arquivo local (galeria): Content-Length, Content-Type por
@@ -321,6 +442,13 @@ class StreamProxyService {
       final isHls = target.path.toLowerCase().endsWith('.m3u8') ||
           contentType.toLowerCase().contains('mpegurl');
       final response = incoming.response;
+      // Gravação (DVR): a primeira requisição completa do player (sem
+      // Range) alimenta a gravação; requisições Range da TV/smart player
+      // leem bytes diretamente do arquivo gravado.
+      final recording = _entries[incoming.uri.pathSegments.last]?.recording;
+      // Gravação (DVR): a primeira requisição completa do player (sem
+      // Range) alimenta a gravação; requisições Range leem do arquivo.
+      final isRange = incoming.headers.value(HttpHeaders.rangeHeader) != null;
 
       if (statusCode == HttpStatus.partialContent) {
         // Resposta 206 da origem: repassar o trecho byte a byte com os
@@ -331,6 +459,10 @@ class StreamProxyService {
         if (isHls) {
           final playlist = await utf8.decoder.bind(upstream).join();
           response.write(await _rewritePlaylist(playlist, target, headers));
+        } else if (!isRange && recording != null) {
+          // Range da origem sem Range do cliente: gravar o trecho e
+          // repassar.
+          await _forwardWithRecording(response, upstream, recording, true);
         } else {
           await response.addStream(upstream);
         }
@@ -358,7 +490,14 @@ class StreamProxyService {
         return;
       }
 
-      await _streamWithContentLength(incoming, upstream, target, _entries[incoming.uri.pathSegments.last]!);
+      await _streamWithContentLength(
+        incoming,
+        upstream,
+        target,
+        _entries[incoming.uri.pathSegments.last]!,
+        recording,
+        isRange,
+      );
     } finally {
       client.close(force: true);
     }
@@ -372,11 +511,31 @@ class StreamProxyService {
     _forwardHeader(upstream, response, 'content-disposition');
   }
 
+  /// Encaminha os bytes do upstream ao cliente (TV) e, quando há gravação
+  /// em andamento, grava o mesmo fluxo no disco sem duplicar memória.
+  Future<void> _forwardWithRecording(
+    HttpResponse response,
+    HttpClientResponse upstream,
+    Recording? recording,
+    bool isRange,
+  ) async {
+    if (recording == null) {
+      await response.addStream(upstream);
+      return;
+    }
+    await for (final chunk in upstream) {
+      if (!isRange) unawaited(recording.write(chunk));
+      response.add(chunk);
+    }
+  }
+
   Future<void> _streamWithContentLength(
     HttpRequest incoming,
     HttpClientResponse upstream,
     Uri target,
     _TokenEntry entry,
+    Recording? recording,
+    bool isRange,
   ) async {
     final response = incoming.response;
     response.headers.contentType = _contentTypeFor(entry);
@@ -405,14 +564,45 @@ class StreamProxyService {
     // fluxo e buscamos o tamanho em um HEAD separado da origem.
     if (hasLength && !transferEncoding.toLowerCase().contains('chunked')) {
       response.contentLength = originLength!;
-      await response.addStream(upstream);
+      await _forwardWithRecording(response, upstream, recording, isRange);
       await response.close();
       return;
     }
 
     final headLength = await _headContentLength(target);
     if (headLength != null) response.contentLength = headLength;
-    await response.addStream(upstream);
+    await _forwardWithRecording(response, upstream, recording, isRange);
+    await response.close();
+  }
+
+  /// Controle da gravação em andamento (`/streamrec/token`):
+  /// GET devolve status JSON; POST encerra a gravação.
+  Future<void> _handleRecording(HttpRequest request, String token) async {
+    final entry = _recordings[token];
+    final response = request.response;
+    if (entry == null) {
+      response.statusCode = HttpStatus.notFound;
+      await response.close();
+      return;
+    }
+    final recording = entry.recording;
+    if (request.method == 'POST' || request.method == 'DELETE') {
+      await recording.stop();
+      response.statusCode = HttpStatus.ok;
+      response.headers.contentType = ContentType.json;
+      response.write(json.encode({
+        'stopped': true,
+        'bytes': await recording.fileSize,
+      }));
+      await response.close();
+      return;
+    }
+    response.headers.contentType = ContentType.json;
+    response.write(json.encode({
+      'running': recording.isRunning,
+      'bytes': await recording.fileSize,
+      'seconds': recording.estimatedSeconds,
+    }));
     await response.close();
   }
 
@@ -522,6 +712,7 @@ class StreamProxyService {
 
   Future<void> dispose() async {
     _entries.clear();
+    _recordings.clear();
     await _server?.close(force: true);
     _server = null;
   }
@@ -531,6 +722,10 @@ class _TokenEntry {
   _TokenEntry(this.channel);
 
   final Channel channel;
+
+  /// Gravação em andamento atrelada a esta URL de canal (DVR). Nula quando
+  /// ninguém está gravando.
+  Recording? recording;
 
   /// Caminho do arquivo local quando o canal aponta para a galeria
   /// (file://), ou a URL remota original.
@@ -547,4 +742,9 @@ class DlnaProxyException implements Exception {
   final String message;
   @override
   String toString() => message;
+}
+
+class _RecordingEntry {
+  _RecordingEntry(this.recording);
+  final Recording recording;
 }
