@@ -39,4 +39,28 @@ void main() {
     expect(await preferences.cachedChannels(), isEmpty);
     expect(await preferences.playlistUrl(), 'https://example.com/list.m3u');
   });
+
+  test('playlist refresh cache keeps original groups and playback headers',
+      () async {
+    SharedPreferences.setMockInitialValues({});
+    final preferences = PreferencesService();
+    const original = Channel(
+      name: 'Canal autorizado',
+      url: 'https://example.com/live/index.m3u8',
+      group: 'Esportes BR',
+      tvgId: 'sports-br',
+      headers: {
+        'User-Agent': 'StreamBox/1.0',
+        'Referer': 'https://example.com/player',
+      },
+    );
+
+    await preferences.saveChannels(const [original]);
+    final restored = (await preferences.cachedChannels()).single;
+
+    expect(restored.group, original.group);
+    expect(restored.tvgId, original.tvgId);
+    expect(restored.url, original.url);
+    expect(restored.headers, original.headers);
+  });
 }
