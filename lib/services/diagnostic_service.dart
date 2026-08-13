@@ -61,7 +61,7 @@ class DiagnosticService {
     } catch (_) {
       sb.writeln('Versão Android: indisponível');
     }
-    sb.writeln('Versão do StreamBox: 0.7.5');
+    sb.writeln('Versão do StreamBox: 0.7.6');
 
     // Memória aproximada em uso.
     try {
@@ -135,6 +135,14 @@ class DiagnosticService {
       // Falha no compartilhamento: não bloqueia o fluxo; informa o caminho.
     }
     return 'Relatório gravado em: ${file.path}';
+  }
+
+  /// Gera o texto completo do relatório de diagnóstico (igual ao gravado
+  /// em disco), para exibição na tela e cópia para a área de transferência.
+  /// Nenhuma credencial é incluída — o mesmo sanitize de writeReport.
+  static Future<String> reportText() async {
+    final file = await writeReport();
+    return file.readAsString();
   }
 }
 

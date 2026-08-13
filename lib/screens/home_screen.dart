@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../models/channel.dart';
 import '../models/import_summary.dart';
 import '../services/diagnostic_service.dart';
@@ -316,14 +317,48 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _exportDiagnosticReport() async {
+    // Gera o relatório (com sanitize de credenciais), tenta o compartilhamento
+    // nativo e SEMPRE mostra o texto completo em um diálogo com botão Copiar
+    // — o usuário nunca fica sem acesso ao conteúdo para análise.
+    final text = await DiagnosticService.reportText();
+    if (!mounted) return;
     final result = await DiagnosticService.shareReport();
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Relatório de diagnóstico'),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 520, maxHeight: 480),
+          child: SingleChildScrollView(
+            child: SelectableText(
+              text,
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: text));
+              if (dialogContext.mounted) {
+                ScaffoldMessenger.of(dialogContext).showSnackBar(
+                  const SnackBar(content: Text('Relatório copiado — cole na conversa de suporte.')),
+                );
+              }
+            },
+            child: const Text('Copiar'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Fechar'),
+          ),
+        ],
+      ),
+    );
     if (mounted && result.contains('Relatório pronto')) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Relatório de diagnóstico pronto para envio.')),
-      );
-    } else if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Relatório gravado na pasta de dados do aplicativo.')),
+        const SnackBar(content: Text('Compartilhamento aberto com o relatório anexado.')),
       );
     }
   }
