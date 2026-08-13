@@ -18,7 +18,9 @@ Future<HttpServer> _serveServer() async {
           ..write('#EXTM3U\n#EXTINF:-1 tvg-name="Teste 1",Canal Teste\n'
               'http://127.0.0.1:${server.port}/stream\n');
       } else if (path == '/block.m3u') {
-        if (ua == null || !ua.startsWith('StreamBox')) {
+        // Painéis Xtream reais: bloqueiam UAs desconhecidos (403/404) e
+        // liberam players conhecidos como VLC/IPTV Smarters.
+        if (ua == null || !ua.startsWith('VLC') && !ua.startsWith('IPTVSmarters')) {
           request.response.statusCode = HttpStatus.forbidden;
           request.response.write('<html><body>Forbidden</body></html>');
         } else {
@@ -82,8 +84,9 @@ void main() {
       final result = await service.importFromUrl(
         'http://127.0.0.1:${server.port}/block.m3u',
       );
-      // O cliente do app envia 'StreamBox-IPTV/...', então a lista carrega.
-      // Este teste comprova que o UA é enviado: sem ele, o resultado seria 403.
+      // O cliente do app envia 'VLC/3.0.20 LibVLC/3.0.20' (player IPTV
+      // comum), então a lista carrega. Este teste comprova que o UA é
+      // enviado: sem ele, o resultado seria 403.
       expect(result.statusCode, isNull);
       expect(result.channels, isNotEmpty);
     } finally {

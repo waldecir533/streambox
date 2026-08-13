@@ -107,7 +107,7 @@ void main() {
         // Esperado: nenhum canal na resposta.
       }
       expect(receivedUa, isNotNull);
-      expect(receivedUa, contains('StreamBox'));
+      expect(receivedUa, contains('VLC/3.0.20 LibVLC/3.0.20'));
     });
 
     test('resposta em lista direta também é aceita', () async {

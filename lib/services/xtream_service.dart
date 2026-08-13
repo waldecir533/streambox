@@ -5,7 +5,10 @@ import '../models/channel.dart';
 class XtreamService {
   XtreamService({http.Client? client, String? userAgent})
       : _client = client ?? http.Client(),
-        _userAgent = userAgent ?? 'StreamBox-IPTV/0.7';
+        // User-Agent de player IPTV comum: painéis Xtream frequentemente
+        // bloqueiam UAs desconhecidos (404/403) e liberam players conhecidos
+        // como VLC/3.0.20 LibVLC/3.0.20 ou IPTV Smarters.
+        _userAgent = userAgent ?? 'VLC/3.0.20 LibVLC/3.0.20';
   final http.Client _client;
   final String _userAgent;
 

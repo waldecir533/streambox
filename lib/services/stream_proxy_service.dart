@@ -2,8 +2,11 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show debugPrint;
+
 import '../models/channel.dart';
 import 'recording_service.dart';
+import 'relay_foreground_service.dart';
 
 /// Servidor HTTP local que retransmite vídeos (M3U, HLS e arquivos da
 /// galeria) para Smart TVs via DLNA/UPnP.
@@ -22,10 +25,19 @@ class StreamProxyService {
   final Map<String, _TokenEntry> _entries = {};
   final Map<String, _RecordingEntry> _recordings = {};
 
+  /// Sessões ativas do relay (cada requisição de streaming de uma TV abre
+  /// uma sessão). O foreground service Android fica ativo enquanto houver
+  /// ao menos uma sessão, evitando que o Android suspenda o socket do
+  /// servidor local em segundo plano.
+  int _activeSessions = 0;
+
   Future<Uri> urlFor(Channel channel) async {
     await _ensureStarted();
+    _openSession(channel.name);
     final token = base64Url.encode(utf8.encode(channel.url)).replaceAll('=', '');
-    _entries[token] = _TokenEntry(channel);
+    final entry = _TokenEntry(channel);
+    _entries[token] = entry;
+    entry.sessionDone.then((_) => _closeSession());
     return Uri(
       scheme: 'http',
       host: _host,
@@ -65,7 +77,9 @@ class StreamProxyService {
   /// chegam ao disco (GET/HEAD com Content-Length e Range/206).
   Uri recordingUrl(Recording recording) {
     final token = base64Url.encode(utf8.encode(recording.id)).replaceAll('=', '');
+    _openSession('gravação: ${recording.channelName}');
     _recordings[token] = _RecordingEntry(recording);
+    recording.finished.then((_) => _closeSession());
     return Uri(
       scheme: 'http',
       host: _host,
@@ -121,11 +135,35 @@ class StreamProxyService {
 
   Future<void> _ensureStarted() async {
     if (_server != null) return;
-    // Qualquer IPv4 da rede local para a TV alcançar o celular pela Wi-Fi.
+    // Qualquer IPv4 da rede local para a TV alcançar o celular pela Wi-Fi:
+    // explicitamente anyIPv4 (0.0.0.0) — nunca loopback (127.0.0.1), que a
+    // TV não conseguiria alcançar.
     final server = await HttpServer.bind(InternetAddress.anyIPv4, 0);
     _server = server;
     _host = await _advertisedAddress(server.port);
+    debugPrint(
+      '[StreamBox] Relay bind: InternetAddress.anyIPv4 (0.0.0.0), '
+      'endereço anunciado $hostPort',
+    );
     unawaited(server.forEach(_handle));
+  }
+
+  /// Endereço de diagnóstico no formato host:porta.
+  String? get hostPort => _host == null || _server == null
+      ? null
+      : '$_host:${_server!.port}';
+
+  void _openSession(String channelName) {
+    _activeSessions++;
+    RelayForegroundService.start(channelName: channelName);
+  }
+
+  void _closeSession() {
+    _activeSessions--;
+    if (_activeSessions <= 0) {
+      _activeSessions = 0;
+      RelayForegroundService.stop();
+    }
   }
 
   /// Escolhe o endereço que será anunciado à TV. Em celulares o endereço
@@ -499,6 +537,10 @@ class StreamProxyService {
         isRange,
       );
     } finally {
+      // A sessão aberta em urlFor/recordingUrl é encerrada aqui, ao fim da
+      // transferência — quando todas as sessões fecham, o foreground
+      // service do relay pode parar.
+      _entries[incoming.uri.pathSegments.last]?.finishSession();
       client.close(force: true);
     }
   }
@@ -722,6 +764,16 @@ class _TokenEntry {
   _TokenEntry(this.channel);
 
   final Channel channel;
+  final Completer<void> _sessionDone = Completer<void>();
+
+  /// Completa quando a sessão de streaming desta URL termina (fim do
+  /// GET/forward), permitindo liberar o foreground service do relay.
+  Future<void> get sessionDone => _sessionDone.future;
+
+  /// Marca a sessão como encerrada (idempotente).
+  void finishSession() {
+    if (!_sessionDone.isCompleted) _sessionDone.complete();
+  }
 
   /// Gravação em andamento atrelada a esta URL de canal (DVR). Nula quando
   /// ninguém está gravando.

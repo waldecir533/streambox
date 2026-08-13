@@ -74,10 +74,28 @@ List<_Scenario> _handlers({required int altPort}) => [
           ..write('');
         req.response.close();
       }),
+      _Scenario('/redirect-cadeia.m3u', (req, srv) {
+        // Cadeia realista: 301 (troca de domínio) → 307 (revalidação) → lista.
+        req.response
+          ..statusCode = HttpStatus.movedPermanently
+          ..headers.set(HttpHeaders.locationHeader,
+              'http://127.0.0.1:$altPort/redir-307.m3u')
+          ..write('');
+        req.response.close();
+      }),
+      _Scenario('/redir-307.m3u', (req, srv) {
+        req.response
+          ..statusCode = HttpStatus.temporaryRedirect
+          ..headers.set(HttpHeaders.locationHeader,
+              'http://127.0.0.1:$altPort/dest.m3u')
+          ..write('');
+        req.response.close();
+      }),
       _Scenario('/dest.m3u', (req, srv) {
         // Destino do redirect — bloqueia sem UA (comportamento real).
         final ua = req.headers.value(HttpHeaders.userAgentHeader);
-        final ok = (ua ?? '').startsWith('StreamBox');
+        final ok = (ua ?? '').startsWith('VLC') ||
+            (ua ?? '').startsWith('IPTVSmarters');
         req.response
           ..statusCode = ok ? HttpStatus.ok : HttpStatus.forbidden
           ..headers.contentType = ContentType.text
@@ -173,6 +191,42 @@ void main() {
     } finally {
       service.dispose();
       await server.close();
+      await alt.close();
+    }
+  });
+
+  test('cadeia 301 → 307 é seguida mantendo User-Agent no destino', () async {
+    // Cada handler captura 'altPort' no momento da criação; por isso o
+    // servidor que hospeda /redir-307.m3u precisa ser criado COM a porta
+    // real do destino já conhecida.
+    Future<HttpServer> serveRedir307(int destPort) => _serve([
+          _Scenario('/redir-307.m3u', (req, srv) {
+            req.response
+              ..statusCode = HttpStatus.temporaryRedirect
+              ..headers.set(HttpHeaders.locationHeader,
+                  'http://127.0.0.1:$destPort/dest.m3u')
+              ..write('');
+            req.response.close();
+          }),
+        ]);
+    final alt = await _serve(
+      _handlers(altPort: 0).where((h) => h.path == '/dest.m3u').toList(),
+    );
+    final mid = await serveRedir307(alt.port);
+    final server = await _serve(_handlers(altPort: mid.port));
+    final service = PlaylistService();
+    try {
+      final result = await service.importFromUrl(
+        'http://127.0.0.1:${server.port}/redirect-cadeia.m3u',
+      );
+      if (result.message != null) {
+        fail('falha inesperada na cadeia 301 → 307: ${result.message}');
+      }
+      expect(result.channels, hasLength(2));
+    } finally {
+      service.dispose();
+      await server.close();
+      await mid.close();
       await alt.close();
     }
   });

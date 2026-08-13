@@ -1,4 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Foreground service do relay DLNA (manter o servidor local vivo):
+         Android 13+ exige a permissão declarada para iniciar o service. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
     <application
         android:label="streambox"
         android:name="${applicationName}"
@@ -25,6 +30,14 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- Foreground service dedicado ao servidor HTTP do relay DLNA:
+             mantém o socket do servidor local vivo enquanto uma TV estiver
+             reproduzindo, evitando suspensão em segundo plano. -->
+        <service
+            android:name=".StreamBoxRelayService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

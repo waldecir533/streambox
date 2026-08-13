@@ -154,7 +154,10 @@ class PlaylistService {
       // nós mesmos, sempre repassando os mesmos headers.
       response = await _getFollowingRedirects(uri, const {
         'Accept-Encoding': 'gzip',
-        'User-Agent': 'StreamBox-IPTV/0.7',
+        // User-Agent de player IPTV comum: vários painéis Xtream/provedores
+        // bloqueiam UAs desconhecidos (retornam 404/403) e liberam players
+        // conhecidos como VLC/IPTV Smarters.
+        'User-Agent': 'VLC/3.0.20 LibVLC/3.0.20',
       }).timeout(timeout);
     } on TimeoutException {
       return ImportResult(

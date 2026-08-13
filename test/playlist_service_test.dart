@@ -37,7 +37,7 @@ void main() {
     );
     expect(result.isSuccess, isTrue);
     expect(result.channels, hasLength(1));
-    expect(receivedHeaders['user-agent'], contains('StreamBox'));
+    expect(receivedHeaders['user-agent'], contains('VLC/3.0.20 LibVLC/3.0.20'));
     service.dispose();
   });
 }
