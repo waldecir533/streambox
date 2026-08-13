@@ -30,6 +30,18 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- Provedor de arquivos para compartilhar o relatório de diagnóstico
+             por WhatsApp/e-mail via Intent.ACTION_SEND (FileProvider). -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <!-- Foreground service dedicado ao servidor HTTP do relay DLNA:
              mantém o socket do servidor local vivo enquanto uma TV estiver
              reproduzindo, evitando suspensão em segundo plano. -->

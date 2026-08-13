@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
 /// Relatório de diagnóstico do aplicativo, exportável para análise.
@@ -60,7 +61,7 @@ class DiagnosticService {
     } catch (_) {
       sb.writeln('Versão Android: indisponível');
     }
-    sb.writeln('Versão do StreamBox: 0.6.0+10');
+    sb.writeln('Versão do StreamBox: 0.7.4');
 
     // Memória aproximada em uso.
     try {
@@ -98,28 +99,34 @@ class DiagnosticService {
     return file;
   }
 
-  /// Compartilha o relatório por e-mail/aplicativos de arquivos, se
-  /// disponível na plataforma. Retorna a descrição do resultado.
+  /// Canal nativo do Android para o compartilhamento via FileProvider
+  /// (Intent.ACTION_SEND com chooser — WhatsApp, e-mail, arquivos...).
+  static const MethodChannel _shareChannel = MethodChannel('share_report');
+
+  /// Grava o relatório na pasta de dados do app (persistente, como antes)
+  /// e abre o menu nativo de compartilhamento do Android com o arquivo
+  /// anexado — via FileProvider, que dá às outras apps acesso temporário
+  /// ao arquivo sem precisar de root. Retorna a descrição do resultado.
+  ///
+  /// Em plataformas sem o canal nativo (testes/emulador), apenas grava e
+  /// informa o caminho.
   static Future<String> shareReport() async {
     final file = await writeReport();
     if (!Platform.isAndroid) {
       return 'Relatório gravado em: ${file.path}';
     }
     try {
-      final result = await Process.run(
-        'am',
-        [
-          'start',
-          '-a', 'android.intent.action.SEND',
-          '-t', 'text/plain',
-          '--es', 'android.intent.extra.STREAM', 'file://${file.path}',
-        ],
+      final ok = await _shareChannel.invokeMethod<bool>(
+        'share',
+        {'file_path': file.path},
       );
-      if (result.exitCode == 0) {
+      if (ok == true) {
         return 'Relatório pronto para envio.';
       }
+    } on MissingPluginException {
+      // Rodando sem o canal nativo (teste/emulador): segue abaixo.
     } catch (_) {
-      // Fallback: apenas informar o caminho.
+      // Falha no compartilhamento: não bloqueia o fluxo; informa o caminho.
     }
     return 'Relatório gravado em: ${file.path}';
   }
