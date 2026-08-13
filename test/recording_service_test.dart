@@ -93,16 +93,19 @@ void main() {
       await recording.open();
       await recording.write(List.filled(600, 1));
       await recording.stop();
-      // Garante ordem de criação diferente.
-      await Future<void>.delayed(const Duration(milliseconds: 20));
+      // Garante ordem de criação diferente (resolução do relógio no CI).
+      await Future<void>.delayed(const Duration(milliseconds: 100));
     }
 
     await RecordingService.instance.enforceStorageLimit(1200);
 
     final list = await RecordingService.instance.list();
     expect(list, hasLength(2));
-    // As gravações mais antigas são apagadas primeiro (Canal 0 criado antes).
-    expect(list.map((r) => r.channelName), isNot(contains('Canal 0')));
+    // As gravações mais antigas são apagadas primeiro.
+    final canal0 = list.where((r) => r.channelName == 'Canal 0').toList();
+    if (canal0.isNotEmpty) {
+      fail('A gravação mais antiga (Canal 0) deveria ter sido apagada.');
+    }
   });
 
   test('safe filenames strip invalid characters (file is created)', () async {
