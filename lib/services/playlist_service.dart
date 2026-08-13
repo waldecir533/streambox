@@ -92,7 +92,12 @@ class PlaylistService {
   PlaylistService({
     http.Client? client,
     this.timeout = const Duration(seconds: 45),
-  }) : _client = client ?? http.Client();
+  }) : _client = client ?? _createNoRedirectClient();
+
+  /// Cliente que NÃO segue redirecionamentos automaticamente: quem controla
+  /// os saltos é [_getFollowingRedirects], que mantém os headers
+  /// personalizados (User-Agent) em cada passo.
+  static http.Client _createNoRedirectClient() => _ManualClient();
 
   final http.Client _client;
   final Duration timeout;
@@ -128,14 +133,15 @@ class PlaylistService {
     final List<int> bodyBytes;
     final http.Response response;
     try {
-      response = await _client.get(
-        uri,
-        headers: const {
-          // gzip é aceito e descompactado automaticamente pelo pacote http.
-          'Accept-Encoding': 'gzip',
-          'User-Agent': 'StreamBox-IPTV/0.7',
-        },
-      ).timeout(timeout);
+      // Redirect manual: o cliente padrão do Dart segue redirecionamentos,
+      // mas DESCARTA headers personalizados (User-Agent, Accept-Encoding) no
+      // salto — e muitos provedores IPTV bloqueiam o destino do redirect
+      // sem esses headers (403 silencioso). Então seguimos os redirects
+      // nós mesmos, sempre repassando os mesmos headers.
+      response = await _getFollowingRedirects(uri, const {
+        'Accept-Encoding': 'gzip',
+        'User-Agent': 'StreamBox-IPTV/0.7',
+      }).timeout(timeout);
     } on TimeoutException {
       return ImportResult(
         sourceType: SourceType.unknown,
@@ -292,8 +298,235 @@ class PlaylistService {
     );
   }
 
+  /// Faz a requisição e segue manualmente os redirects 301/302/303/307/308
+  /// repassando os headers originais (limite de 5 saltos).
+  Future<http.Response> _getFollowingRedirects(
+    Uri uri,
+    Map<String, String> headers,
+  ) async {
+    final client = _client;
+    for (var remaining = 5;;) {
+      final response = await client.get(uri, headers: headers);
+      if (response.statusCode != 301 &&
+          response.statusCode != 302 &&
+          response.statusCode != 303 &&
+          response.statusCode != 307 &&
+          response.statusCode != 308) {
+        return response;
+      }
+      final location = response.headers['location'];
+      if (location == null || location.isEmpty || remaining == 0) {
+        return response;
+      }
+      final next = uri.resolve(location.trim());
+      if (!next.hasScheme ||
+          (next.scheme != 'http' && next.scheme != 'https')) {
+        return response;
+      }
+      // 303 converte qualquer método em GET; 301/302 mantêm headers.
+      uri = next;
+      remaining--;
+    }
+  }
+
   void dispose() {
-    cancelToken?.cancel();
     _client.close();
+  }
+}
+
+
+/// Cliente HTTP manual com redirects controlados pelo PlaylistService.
+/// O HttpClient nativo NÃO pode desligar o follow automático de redirects,
+/// mas ele não repassa headers customizados nos saltos — exatamente a causa
+/// do bug relatado (provedor bloqueia o destino do 301/302 por falta de
+/// User-Agent). Aqui as requisições são feitas com openUrl(): nenhum
+/// redirect é seguido automaticamente; o PlaylistService gerencia os saltos.
+/// Cliente HTTP manual com redirects controlados pelo PlaylistService.
+///
+/// O HttpClient nativo de dart:io SEMPRE segue redirecionamentos
+/// automaticamente e não oferece como injetar headers no salto — exatamente
+/// a causa do bug relatado (provedor bloqueia o destino do 301/302 por
+/// falta de User-Agent e o app recebia 403/erro silencioso). Para ter
+/// controle total, as requisições GET são feitas diretamente via socket
+/// (HTTP/1.1 sem auto-follow); os redirects são gerenciados pelo
+/// [_getFollowingRedirects], que repassa os mesmos headers em cada passo.
+/// Cliente HTTP manual com redirects controlados pelo PlaylistService.
+///
+/// O HttpClient nativo de dart:io SEMPRE segue redirecionamentos
+/// automaticamente e não permite injetar headers no salto — exatamente a
+/// causa do bug relatado (provedor bloqueia o destino do 301/302 por falta
+/// de User-Agent e o app recebia 403 ou erro silencioso). As requisições
+/// GET aqui são feitas diretamente via socket (HTTP/1.1 sem auto-follow):
+/// a resposta 301/302 chega inteira, e o PlaylistService gerencia os saltos
+/// em [_getFollowingRedirects], repassando os mesmos headers em cada passo.
+
+/// Cliente HTTP manual com redirects controlados pelo PlaylistService.
+///
+/// O HttpClient nativo de dart:io SEMPRE segue redirecionamentos
+/// automaticamente e não permite injetar headers no salto — exatamente a
+/// causa do bug relatado (provedor bloqueia o destino do 301/302 por falta
+/// de User-Agent e o app recebia 403 ou erro silencioso). As requisições
+/// GET aqui são feitas diretamente via socket (HTTP/1.1 sem auto-follow):
+/// a resposta 301/302 chega inteira, e o PlaylistService gerencia os saltos
+/// em [_getFollowingRedirects], repassando os mesmos headers em cada passo.
+class _ManualClient extends http.BaseClient {
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    final raw = await _RawHttpGet.perform(
+      request.url,
+      request.headers,
+      const Duration(minutes: 2),
+    );
+    return http.StreamedResponse(
+      Stream.value(raw.bytes),
+      raw.statusCode,
+      headers: raw.headers,
+      contentLength: raw.bytes.length,
+      request: request,
+    );
+  }
+
+  @override
+  void close() {}
+}
+
+class _RawHttpGet {
+  _RawHttpGet(this.statusCode, this.headers, this.bytes);
+
+  final int statusCode;
+  final Map<String, String> headers;
+  final List<int> bytes;
+
+  /// Executa um GET HTTP/1.1 direto no socket: o servidor de redirect
+  /// responde com 301/302 e a leitura para (nada é seguido sozinho).
+  static Future<_RawHttpGet> perform(
+    Uri uri,
+    Map<String, String> headers,
+    Duration timeout,
+  ) async {
+    final secure = uri.scheme == 'https';
+    final port = uri.hasPort ? uri.port : (secure ? 443 : 80);
+    final socket = await Socket.connect(uri.host, port).timeout(
+      timeout,
+      onTimeout: () => throw TimeoutException(
+        'A conexão com o servidor demorou mais que o esperado.',
+      ),
+    );
+    Stream<List<int>> source = socket;
+    if (secure) {
+      try {
+        source = await SecureSocket.secure(socket, host: uri.host).timeout(
+          timeout,
+          onTimeout: () {
+            socket.destroy();
+            throw TimeoutException(
+              'A conexão segura demorou mais que o esperado.',
+            );
+          },
+        );
+      } catch (error) {
+        socket.destroy();
+        rethrow;
+      }
+    }
+
+    final path = uri.hasQuery
+        ? '${uri.path.isEmpty ? '/' : uri.path}?${uri.query}'
+        : (uri.path.isEmpty ? '/' : uri.path);
+    final requestBuffer = StringBuffer();
+    requestBuffer.write('GET $path HTTP/1.1\r\n');
+    headers.forEach((name, value) {
+      requestBuffer.write('$name: $value\r\n');
+    });
+    requestBuffer.write('Host: ${uri.host}${uri.hasPort ? ':${uri.port}' : ''}\r\n');
+    requestBuffer.write('Connection: close\r\n');
+    requestBuffer.write('\r\n');
+    socket.write(requestBuffer.toString());
+
+    final chunks = <List<int>>[];
+    final completer = Completer<void>();
+    late StreamSubscription<List<int>> subscription;
+    subscription = source.listen(
+      chunks.add,
+      onError: (Object error) {
+        if (!completer.isCompleted) completer.completeError(error);
+      },
+      onDone: () {
+        if (!completer.isCompleted) completer.complete();
+      },
+    );
+    await completer.future.timeout(timeout, onTimeout: () {
+      subscription.cancel();
+      throw TimeoutException('O servidor demorou mais que o esperado.');
+    });
+    await subscription.cancel();
+    await socket.close();
+    return _RawHttpGet.parse(chunks);
+  }
+
+  static _RawHttpGet parse(List<List<int>> chunks) {
+    String raw = String.fromCharCodes(
+      chunks.expand((chunk) => chunk).toList(),
+    );
+    // O servidor pode responder com Transfer-Encoding: chunked (sem
+    // Content-Length). Decodificamos os blocos manualmente.
+    final headerEnd = raw.indexOf('\r\n\r\n');
+    final headerBlock = headerEnd >= 0 ? raw.substring(0, headerEnd) : raw;
+    final transferEncoding = headerBlock
+        .split('\r\n')
+        .firstWhere(
+          (line) => line.toLowerCase().startsWith('transfer-encoding'),
+          orElse: () => '',
+        );
+    final isChunked = transferEncoding.toLowerCase().contains('chunked');
+    final body = isChunked
+        ? _decodeChunked(headerEnd >= 0 ? raw.substring(headerEnd + 4) : raw)
+        : (headerEnd >= 0 ? raw.substring(headerEnd + 4) : '');
+    if (isChunked) {
+      raw = '$headerBlock\r\n\r\n$body';
+    }
+
+    final firstLineEnd = headerBlock.indexOf('\r\n');
+    final statusLine = firstLineEnd >= 0
+        ? headerBlock.substring(0, firstLineEnd)
+        : headerBlock;
+    final parts = statusLine.split(' ');
+    final status = parts.length >= 2
+        ? int.tryParse(parts[1]) ?? 0
+        : 0;
+
+    final responseHeaders = <String, String>{};
+    if (firstLineEnd >= 0) {
+      for (final line
+          in headerBlock.substring(firstLineEnd + 2).split('\r\n')) {
+        final separator = line.indexOf(':');
+        if (separator > 0) {
+          responseHeaders[line.substring(0, separator).trim().toLowerCase()] =
+              line.substring(separator + 1).trim();
+        }
+      }
+    }
+    return _RawHttpGet(status, responseHeaders, body.codeUnits);
+  }
+
+  /// Remove a codificação chunked de HTTP/1.1 (tamanho em hexa + CRLF +
+  /// dados, encerrado por '0\r\n').
+  static String _decodeChunked(String raw) {
+    final buffer = StringBuffer();
+    var cursor = 0;
+    while (cursor < raw.length) {
+      final lineEnd = raw.indexOf('\r\n', cursor);
+      if (lineEnd < 0) break;
+      final size = int.tryParse(
+        raw.substring(cursor, lineEnd).trim().split(';').first.trim(),
+        radix: 16,
+      );
+      if (size == null || size == 0) break;
+      cursor = lineEnd + 2;
+      if (cursor + size > raw.length) break;
+      buffer.write(raw.substring(cursor, cursor + size));
+      cursor += size + 2;
+    }
+    return buffer.toString();
   }
 }
