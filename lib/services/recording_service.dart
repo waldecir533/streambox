@@ -39,7 +39,10 @@ class RecordingService {
   /// Inicia a gravação de um canal. Retorna a gravação em andamento.
   Future<Recording> start(String channelName, String channelUrl) async {
     final directory = await _dir;
-    final stamp = DateTime.now().toIso8601String().substring(0, 19);
+    final now = DateTime.now();
+    // Carimbo com data legível + milissegundos (formato ISO com fração)
+    // para não repetir e manter a ordenação mesmo em máquinas rápidas.
+    final stamp = '${now.toIso8601String().substring(0, 19)}.${(now.millisecondsSinceEpoch % 1000).toString().padLeft(3, '0')}';
     final file = File('${directory.path}/${Recording._safe(channelName)}_$stamp.ts');
     final recording = Recording.inProgress(channelName, channelUrl, file);
     _active[recording.id] = recording;
@@ -78,11 +81,13 @@ class RecordingService {
     if (maxBytes <= 0) return;
     final recordings = await list().then((list) =>
         list.where((r) => !r.isRunning).toList());
+    // list() retorna da mais nova para a mais antiga; para respeitar o
+    // limite apagamos as gravações mais antigas primeiro.
     int total = 0;
     for (final recording in recordings) {
       total += await recording.fileSize;
     }
-    for (final recording in recordings) {
+    for (final recording in recordings.reversed) {
       if (total <= maxBytes) return;
       total -= await recording.fileSize;
       await recording.delete();
@@ -177,8 +182,8 @@ class Recording {
   }
 
   static DateTime _parseStamp(String path) {
-    // Nome gerado como "<canal>_2026-08-13T15:30:45.ts"
-    final match = RegExp(r'_(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.ts$')
+    // Nome gerado como "<canal>_2026-08-13T15:30:45.123.ts"
+    final match = RegExp(r'_(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,4})\.ts$')
         .firstMatch(path);
     return DateTime.tryParse(match?.group(1) ?? '') ??
         DateTime.fromMillisecondsSinceEpoch(0);
