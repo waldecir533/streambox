@@ -1,9 +1,14 @@
 import 'package:flutter/material.dart';
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_vlc_player/flutter_vlc_player.dart';
 import 'package:video_player/video_player.dart';
 
 import '../models/channel.dart';
+import '../services/preferences_service.dart';
+import '../services/recording_service.dart';
+import '../services/stream_proxy_service.dart';
 import '../widgets/cast_dialog.dart';
 
 enum PlayerEngine { automatic, media3, libvlc }
@@ -33,13 +38,33 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _loading = true;
   bool _playing = false;
   bool _fullscreen = false;
+  PreferencesService get _prefs => PreferencesService();
   String? _error;
   double _speed = 1;
+  Recording? _recording;
+  Timer? _recTimer;
+  bool get _isRecording => _recording != null && _recording!.isRunning;
 
   @override
   void initState() {
     super.initState();
-    _startMedia3();
+    // Preferência do usuário em Configurações (automatic, media3 ou libvlc).
+    // Falha ao ler não bloqueia a reprodução: usa o automático.
+    _loadEnginePreference().then((engine) {
+      if (engine == 'libvlc' || engine == 'vlc') {
+        _startVlc();
+      } else {
+        _startMedia3();
+      }
+    }, onError: (_) { _startMedia3(); return null; });
+  }
+
+  Future<String> _loadEnginePreference() async {
+    try {
+      return await _prefs.playerEnginePreference();
+    } catch (_) {
+      return 'automatic';
+    }
   }
 
   Future<void> _startMedia3() async {
@@ -179,16 +204,29 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Future<void> _toggleFullscreen() async {
     _fullscreen = !_fullscreen;
     if (_fullscreen) {
-      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-      await SystemChrome.setPreferredOrientations([
-        DeviceOrientation.landscapeLeft,
-        DeviceOrientation.landscapeRight,
-      ]);
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+      final rotate = await _shouldRotateLandscape();
+      if (rotate) {
+        SystemChrome.setPreferredOrientations([
+          DeviceOrientation.landscapeLeft,
+          DeviceOrientation.landscapeRight,
+        ]);
+      }
     } else {
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
       await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
     }
     if (mounted) setState(() {});
+  }
+
+  /// Gira para paisagem na tela cheia somente se o usuário permitiu em
+  /// Configurações.
+  Future<bool> _shouldRotateLandscape() async {
+    try {
+      return await _prefs.fullscreenLandscape();
+    } catch (_) {
+      return true;
+    }
   }
 
   double get _aspectRatio {
@@ -241,8 +279,57 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   Future<void> _reload() => _activeEngine == PlayerEngine.libvlc ? _startVlc() : _startMedia3();
 
+  Future<void> _toggleRecording() async {
+    try {
+      if (_isRecording) {
+        final recording = _recording;
+        _recording = null;
+        _recTimer?.cancel();
+        _recTimer = null;
+        if (recording != null) {
+          await StreamProxyService().stopRecording(widget.channel.url);
+          await recording.stop();
+          // Regravações em disco ficam visíveis na aba Gravações.
+          RecordingService.instance.onRecordingsChanged.drain();
+        }
+      } else {
+        final recording = await RecordingService.instance.start(
+          widget.channel.name,
+          widget.channel.url,
+        );
+        // Falha ao registrar no proxy (por exemplo, servidor não iniciado)
+        // não impede a reprodução; a gravação simplesmente não ocorre.
+        try {
+          StreamProxyService().startRecording(widget.channel.url, recording);
+        } catch (_) {}
+        _recording = recording;
+        if (mounted) setState(() {});
+        _recTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+          if (mounted) setState(() {});
+        });
+      }
+      if (mounted) setState(() {});
+    } catch (_) {
+      // Falha ao iniciar/parar a gravação não pode afetar a reprodução.
+      if (mounted) setState(() {});
+    }
+  }
+
+  String _recTimeLabel() {
+    final seconds = _recording?.estimatedSeconds ?? 0;
+    final mm = (seconds ~/ 60).toString().padLeft(2, '0');
+    final ss = (seconds % 60).toString().padLeft(2, '0');
+    return 'REC $mm:$ss';
+  }
+
   @override
   void dispose() {
+    _recTimer?.cancel();
+    final recording = _recording;
+    if (recording != null && recording.isRunning) {
+      unawaited(StreamProxyService().stopRecording(widget.channel.url));
+      unawaited(recording.stop());
+    }
     _disposePlayers();
     if (_fullscreen) {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
@@ -281,6 +368,21 @@ class _PlayerScreenState extends State<PlayerScreen> {
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
+            if (_isRecording)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  const Icon(Icons.fiber_manual_record, color: Colors.red, size: 20),
+                  const SizedBox(width: 4),
+                  Text(_recTimeLabel(), style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
+                ]),
+              ),
+            IconButton(
+              onPressed: _toggleRecording,
+              color: _isRecording ? Colors.red : Colors.white,
+              tooltip: _isRecording ? 'Parar gravação' : 'Gravar',
+              icon: Icon(_isRecording ? Icons.stop_circle : Icons.fiber_manual_record),
+            ),
             IconButton(
               onPressed: () => showDialog<void>(
                 context: context,

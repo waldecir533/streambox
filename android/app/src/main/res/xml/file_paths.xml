@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Cache do app, onde o relatório de diagnóstico é copiado para
+         compartilhamento via Intent.ACTION_SEND (FileProvider). -->
+    <cache-path name="share_cache" path="." />
+    <files-path name="documents" path="." />
+</paths>
