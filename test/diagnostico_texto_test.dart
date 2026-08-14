@@ -33,7 +33,7 @@ void main() {
     final text = await DiagnosticService.reportText();
 
     expect(text, contains('=== StreamBox — Relatório de Diagnóstico ==='));
-    expect(text, contains('Versão do StreamBox: 0.7.6'));
+    expect(text, contains('Versão do StreamBox: 0.7.7'));
     expect(text, contains('Código HTTP: 404'));
     expect(text, contains('Erro de rede: DNS não resolveu'));
     expect(text, contains('Fase da falha: download da lista'));

@@ -39,6 +39,11 @@ enum SourceType {
   /// JSON — possivelmente Xtream/erro do provedor.
   json,
 
+  /// Texto simples de erro devolvido por um painel/provedor (por exemplo,
+  /// "User authentication failed." do Xtream Codes quando o get.php recebe
+  /// credenciais inválidas/expiradas ou quando o provedor bloqueia o acesso).
+  panelError,
+
   /// Conteúdo binário/texto não reconhecido.
   unknown,
 }
@@ -63,6 +68,11 @@ class SourceInspection {
         return 'O endereço devolveu dados em JSON, não uma lista M3U. '
             'Se for um painel Xtream Codes, use a aba "Xtream" com servidor, '
             'usuário e senha em vez de colar a URL da lista.';
+      case SourceType.panelError:
+        return 'O servidor respondeu com uma mensagem de erro em vez da '
+            'lista. Se a URL for do painel Xtream (get.php), as credenciais '
+            'podem estar erradas, expiradas ou desativadas pelo provedor — '
+            'tente outro link autorizado ou peça um novo ao provedor.';
       case SourceType.hlsStream:
         return 'Este endereço é um stream individual (HLS), não uma lista '
             'com vários canais. Ele pode ser salvo como canal avulso com o '
@@ -145,6 +155,21 @@ class M3uParser {
         type: SourceType.directStream,
         message: 'O conteúdo parece ser um fluxo de vídeo direto, não uma '
             'lista de canais. Ele pode ser salvo como canal avulso.',
+        contentType: contentType,
+      );
+    }
+
+    // Painéis Xtream/provedores IPTV devolvem texto simples de erro quando as
+    // credenciais falham ("User authentication failed.", "Not found", etc.) —
+    // sem isso o conteúdo cai como "unknown" e o usuário não sabe a causa.
+    final lower = trimmed;
+    if (_panelErrorPatterns.any((pattern) => lower.contains(pattern))) {
+      return SourceInspection(
+        type: SourceType.panelError,
+        message: 'O servidor respondeu com uma mensagem de erro em vez da '
+            'lista. Se a URL for do painel Xtream (get.php), as credenciais '
+            'podem estar erradas, expiradas ou desativadas pelo provedor — '
+            'tente outro link autorizado ou peça um novo ao provedor.',
         contentType: contentType,
       );
     }
@@ -387,6 +412,28 @@ class M3uParser {
       'headers': Map<String, String>.unmodifiable(headers),
     };
   }
+
+  /// Trechos típicos de respostas de erro de painéis Xtream/provedores.
+  static const List<String> _panelErrorPatterns = <String>[
+    'authentication failed',
+    'user authentication',
+    'invalid credentials',
+    'invalid user',
+    'invalid password',
+    'access denied',
+    'not authorized',
+    'unauthorized',
+    'forbidden',
+    'not found',
+    'bad request',
+    'server error',
+    'internal error',
+    'service unavailable',
+    'rate limit',
+    'blocked',
+    'expired',
+    'connection failed',
+  ];
 
   static bool _looksLikeUrl(String value) {
     final uri = Uri.tryParse(value);

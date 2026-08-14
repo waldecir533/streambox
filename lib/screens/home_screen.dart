@@ -365,8 +365,25 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _loadXtream(String server, String user, String password) async {
     setState(() { _loading = true; _error = null; });
+    DiagnosticService.importDiagnostic = ImportDiagnostic(
+      sourceType: 'Xtream Codes',
+      sourceDescription: 'servidor Xtream',
+      fileSizeDescription: '-',
+      analyzedCount: 0,
+      savedCount: 0,
+      skippedLines: 0,
+    );
     try { final data = await _xtream.load(server: server, username: user, password: password); if (mounted) setState(() => _channels = data); }
-    catch (_) { if (mounted) setState(() => _error = 'Não foi possível entrar. Confira os dados e sua conexão.'); }
+    catch (error) {
+      if (mounted) {
+        setState(() => _error = error is FormatException
+            ? error.message
+            : 'Não foi possível entrar. Confira os dados e sua conexão.');
+      }
+      DiagnosticService.importDiagnostic
+        ..failurePhase = 'login no servidor Xtream'
+        ..errorMessage = error.toString();
+    }
     finally { if (mounted) setState(() => _loading = false); }
   }
 

@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:http/http.dart' as http;
 import '../models/channel.dart';
 
@@ -37,14 +39,42 @@ class XtreamService {
         'action': 'get_live_streams',
       },
     );
-    final response =
-        await _client.get(uri, headers: _defaultHeaders).timeout(
-              const Duration(seconds: 20),
-            );
-    if (response.statusCode != 200) {
-      throw Exception('Servidor respondeu HTTP ${response.statusCode}.');
+    final http.Response response;
+    try {
+      response = await _client.get(uri, headers: _defaultHeaders).timeout(
+            const Duration(seconds: 20),
+          );
+    } on TimeoutException {
+      throw const FormatException(
+        'A conexão com o servidor demorou mais que o esperado. '
+        'Verifique a internet e tente novamente.',
+      );
+    } on SocketException catch (error) {
+      // Sem alcance ao servidor (DNS, conexão recusada, sem internet).
+      throw FormatException(
+        'Não foi possível conectar ao servidor (${_shortError(error)}). '
+        'Verifique o endereço e a internet.',
+      );
     }
-    final decoded = jsonDecode(response.body);
+    if (response.statusCode != 200) {
+      throw FormatException(
+        'Servidor respondeu HTTP ${response.statusCode}. '
+        'Verifique o endereço do painel e a internet.',
+      );
+    }
+    final dynamic decoded;
+    try {
+      decoded = jsonDecode(response.body);
+    } on FormatException {
+      // Painel bloqueou/errou e devolveu HTML ou texto em vez de JSON
+      // (por exemplo, página de Cloudflare ou "Not found") — o mais comum
+      // quando o acesso por URL da lista também falha no mesmo painel.
+      throw FormatException(
+        'O servidor respondeu conteúdo que não é válido para o painel '
+        'Xtream. Verifique o endereço ou use outra fonte. '
+        '(Resposta: ${response.body.substring(0, 120).trim()})',
+      );
+    }
 
     // Servidores Xtream retornam dois formatos:
     // 1. Objeto: {"live_streams": [{...}, ...]} (padrão Xtream Codes)
@@ -79,6 +109,22 @@ class XtreamService {
         headers: headers,
       );
     }).where((c) => c.url.isNotEmpty).toList();
+  }
+
+  /// Descrição curta do erro de socket, sem IP/detalhes internos.
+  static String _shortError(SocketException error) {
+    if (error.osError == null) return 'erro de rede';
+    if (error.osError!.message.toLowerCase().contains('refused')) {
+      return 'conexão recusada';
+    }
+    if (error.osError!.message.toLowerCase().contains('timed out')) {
+      return 'tempo esgotado';
+    }
+    if (error.osError!.message.toLowerCase().contains('not found') ||
+        error.osError!.message.toLowerCase().contains('unknown')) {
+      return 'servidor não encontrado';
+    }
+    return 'erro de rede';
   }
 
   void dispose() => _client.close();

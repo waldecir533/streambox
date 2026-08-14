@@ -61,7 +61,7 @@ class DiagnosticService {
     } catch (_) {
       sb.writeln('Versão Android: indisponível');
     }
-    sb.writeln('Versão do StreamBox: 0.7.6');
+    sb.writeln('Versão do StreamBox: 0.7.7');
 
     // Memória aproximada em uso.
     try {
@@ -98,6 +98,15 @@ class DiagnosticService {
     if (diag.stackTrace != null) {
       sb.writeln('--- Stack trace (sanitizado) ---');
       sb.writeln(sanitize(diag.stackTrace!));
+    }
+
+    // Quando a importação falha na detecção da fonte, gravar o trecho inicial
+    // do conteúdo recebido do servidor (sanitizado) — é o que revela o que o
+    // painel/provedor realmente respondeu (por exemplo, "User authentication
+    // failed." em vez da lista), sem expor credenciais.
+    if (diag.previewContent != null && diag.previewContent!.isNotEmpty) {
+      sb.writeln('--- Início do conteúdo recebido (sanitizado) ---');
+      sb.writeln(sanitize(diag.previewContent!));
     }
 
     final report = sb.toString();
@@ -204,6 +213,11 @@ class ImportDiagnostic {
 
   /// Duração da importação, em segundos.
   double? importTimeSeconds;
+
+  /// Trecho inicial (até ~500 caracteres) do conteúdo recebido do servidor,
+  /// incluído no relatório apenas quando a importação falha. Passa pelo mesmo
+  /// sanitize do restante — nunca traz credenciais ou URL completa.
+  String? previewContent;
 
   factory ImportDiagnostic.fromJson(Map<String, dynamic> json) => ImportDiagnostic.empty();
   Map<String, dynamic> toJson() => const {};

@@ -251,6 +251,9 @@ class PlaylistService {
     );
 
     if (!inspection.isPlaylist) {
+      // Salva o trecho inicial do conteúdo recebido para o relatório de
+      // diagnóstico (sanitizado — nunca traz credenciais/URL completa).
+      DiagnosticService.importDiagnostic.previewContent = _preview(bodyBytes);
       return ImportResult(
         sourceType: inspection.type,
         message: inspection.message,
